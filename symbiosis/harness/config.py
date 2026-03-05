@@ -60,7 +60,7 @@ class AdapterConfig:
     id: str
     type: str
     homeserver: str | None = None
-    access_token: str | None = None
+    base_dir: str | None = None
 
 
 @dataclass
@@ -94,6 +94,7 @@ class SpaceMapping:
 class MessagingConfig:
     adapter: str
     entity_id: str = ""
+    access_token: str | None = None
     spaces: list[SpaceMapping] = field(default_factory=list)
 
 
@@ -159,6 +160,7 @@ def load_instance_config(
         messaging = MessagingConfig(
             adapter=m["adapter"],
             entity_id=m.get("entity_id", ""),
+            access_token=m.get("access_token"),
             spaces=spaces,
         )
 

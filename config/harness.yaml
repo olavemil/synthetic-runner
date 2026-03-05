@@ -12,7 +12,6 @@ adapters:
   - id: matrix-main
     type: matrix
     homeserver: ${MATRIX_HOMESERVER}
-    access_token: ${MATRIX_ACCESS_TOKEN}
 
 storage_dir: instances
 store_path: harness.db

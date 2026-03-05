@@ -115,6 +115,7 @@ class TestLoadInstanceConfig:
             "messaging": {
                 "adapter": "matrix-main",
                 "entity_id": "@bot:matrix.org",
+                "access_token": "secret-token-123",
                 "spaces": [
                     {"name": "main", "handle": "!room:matrix.org"},
                 ],
@@ -134,6 +135,7 @@ class TestLoadInstanceConfig:
         assert result.model == "claude-opus-4-6"
         assert result.messaging is not None
         assert result.messaging.adapter == "matrix-main"
+        assert result.messaging.access_token == "secret-token-123"
         assert len(result.messaging.spaces) == 1
         assert result.messaging.spaces[0].name == "main"
         assert result.schedule == {"heartbeat": "0 * * * *"}

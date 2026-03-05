@@ -21,12 +21,15 @@ class TestLocalFileAdapter:
         assert events[0].room == "test-room"
 
     def test_poll_with_since(self, tmp_path):
+        import time
+
         adapter = LocalFileAdapter(tmp_path / "messages")
 
         adapter.send("room", "msg1")
         events1, token1 = adapter.poll("room")
         assert len(events1) == 1
 
+        time.sleep(0.01)  # ensure different timestamp
         adapter.send("room", "msg2")
         events2, token2 = adapter.poll("room", since_token=token1)
         assert len(events2) == 1

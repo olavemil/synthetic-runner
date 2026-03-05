@@ -23,6 +23,7 @@ def make_ctx(tmp_path, adapter=None, messaging=True):
     msg_config = MessagingConfig(
         adapter="test-adapter",
         entity_id="@bot:test",
+        access_token="test-token",
         spaces=[SpaceMapping(name="main", handle="!room:test")],
     ) if messaging else None
 

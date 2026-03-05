@@ -46,6 +46,7 @@ class Scheduler:
         self._base_dir = Path(base_dir)
         self._store_db = open_store(self._base_dir / harness_config.store_path)
         self._instance_locks: dict[str, threading.Lock] = {}
+        self._instance_adapters: dict[str, MessagingAdapter] = {}
         self._sync_tokens: dict[str, dict[str, str]] = {}  # instance_id -> {space: token}
         self._running = False
         self._schedule_state: dict[str, float] = {}  # entry key -> next fire time
@@ -54,6 +55,39 @@ class Scheduler:
         if instance_id not in self._instance_locks:
             self._instance_locks[instance_id] = threading.Lock()
         return self._instance_locks[instance_id]
+
+    def _build_adapter(self, instance_config: InstanceConfig) -> MessagingAdapter | None:
+        """Build or retrieve a per-instance messaging adapter.
+
+        Combines shared adapter config (homeserver) with per-instance
+        credentials (access_token from instance messaging config).
+        """
+        instance_id = instance_config.instance_id
+        if instance_id in self._instance_adapters:
+            return self._instance_adapters[instance_id]
+
+        if not instance_config.messaging:
+            return None
+
+        adapter_id = instance_config.messaging.adapter
+        adapter_config = self._config.get_adapter(adapter_id)
+
+        if adapter_config.type == "matrix":
+            from symbiosis.harness.adapters.matrix import MatrixAdapter
+            token = instance_config.messaging.access_token or ""
+            adapter = MatrixAdapter(
+                homeserver=adapter_config.homeserver or "",
+                access_token=token,
+            )
+        elif adapter_config.type == "local_file":
+            from symbiosis.harness.adapters.local_file import LocalFileAdapter
+            adapter = LocalFileAdapter(base_dir=adapter_config.base_dir or "messages")
+        else:
+            logger.warning("Unknown adapter type: %s", adapter_config.type)
+            return None
+
+        self._instance_adapters[instance_id] = adapter
+        return adapter
 
     def _build_context(self, instance_config: InstanceConfig) -> InstanceContext:
         """Construct an InstanceContext for an instance."""
@@ -69,7 +103,7 @@ class Scheduler:
         adapter = None
         space_map: dict[str, str] = {}
         if instance_config.messaging:
-            adapter = self._adapters.get(instance_config.messaging.adapter)
+            adapter = self._build_adapter(instance_config)
             for sp in instance_config.messaging.spaces:
                 space_map[sp.name] = sp.handle
 
@@ -120,8 +154,7 @@ class Scheduler:
                 continue
 
             instance_id = instance_config.instance_id
-            adapter_id = instance_config.messaging.adapter
-            adapter = self._adapters.get(adapter_id)
+            adapter = self._build_adapter(instance_config)
             if adapter is None:
                 continue
 
@@ -245,19 +278,20 @@ def build_providers(harness_config: HarnessConfig) -> dict[str, LLMProvider]:
 
 
 def build_adapters(harness_config: HarnessConfig) -> dict[str, MessagingAdapter]:
-    """Build messaging adapter instances from config."""
+    """Build shared messaging adapter instances from config.
+
+    Note: adapters that require per-instance credentials (like Matrix)
+    are built on demand by the scheduler via _build_adapter(). This
+    function only pre-builds stateless adapters (like local_file).
+    """
     adapters: dict[str, MessagingAdapter] = {}
 
     for ac in harness_config.adapters:
-        if ac.type == "matrix":
-            from symbiosis.harness.adapters.matrix import MatrixAdapter
-            adapters[ac.id] = MatrixAdapter(
-                homeserver=ac.homeserver or "",
-                access_token=ac.access_token or "",
-            )
-        elif ac.type == "local_file":
+        if ac.type == "local_file":
             from symbiosis.harness.adapters.local_file import LocalFileAdapter
-            adapters[ac.id] = LocalFileAdapter(base_dir=ac.homeserver or "messages")
+            adapters[ac.id] = LocalFileAdapter(base_dir=ac.base_dir or "messages")
+        elif ac.type == "matrix":
+            pass  # built per-instance by scheduler (needs per-instance access_token)
         else:
             logger.warning("Unknown adapter type: %s", ac.type)
 
