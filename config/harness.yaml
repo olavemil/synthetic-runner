@@ -1,18 +1,15 @@
 providers:
-  - id: lmstudio
-    type: openai_compat
-    base_url: ${LMSTUDIO_BASE_URL}
-    api_key: lm-studio
-
-  - id: anthropic
-    type: anthropic
-    api_key: ${ANTHROPIC_API_KEY}
-
+- id: lmstudio
+  type: openai_compat
+  base_url: ${LMSTUDIO_BASE_URL}
+  api_key: lm-studio
+- id: anthropic
+  type: anthropic
+  api_key: ${ANTHROPIC_API_KEY}
 adapters:
-  - id: matrix-main
-    type: matrix
-    homeserver: ${MATRIX_HOMESERVER}
-
+- id: matrix-main
+  type: matrix
+  homeserver: ${MATRIX_HOMESERVER}
 storage_dir: instances
 store_path: harness.db
 poll_interval: 30

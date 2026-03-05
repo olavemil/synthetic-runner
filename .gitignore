@@ -30,3 +30,5 @@ instances/
 
 # OS
 .DS_Store
+harness.db-shm
+harness.db-wal

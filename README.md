@@ -28,14 +28,25 @@ uv sync
 
 ### Configure
 
-1. **Create `.env`** with your secrets:
+1. **Run the interactive setup wizard** (recommended):
+
+```bash
+uv run symbiosis setup
+```
+
+This configures `.env`, `config/harness.yaml`, and (if none exists) your first
+instance plus a starter pipeline profile.
+
+2. **Or configure manually**:
+
+Create `.env` with your secrets:
 
 ```bash
 ANTHROPIC_API_KEY=sk-ant-...
 MATRIX_HOMESERVER=https://matrix.example.org
 ```
 
-2. **Edit `config/harness.yaml`** — defines shared infrastructure (providers, adapters):
+Edit `config/harness.yaml` — defines shared infrastructure (providers, adapters):
 
 ```yaml
 providers:
@@ -60,7 +71,7 @@ poll_interval: 30
 
 Providers and adapters are shared infrastructure — `${VAR}` references resolve from `.env` and environment variables at load time.
 
-3. **Create an instance config** in `config/instances/`:
+Create an instance config in `config/instances/`:
 
 ```yaml
 # config/instances/my-agent.yaml
@@ -97,6 +108,12 @@ Options:
 | `--config`, `-c` | `config/harness.yaml` | Harness config path |
 | `--base-dir`, `-d` | `.` | Base directory for storage |
 | `--log-level` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
+
+Setup command:
+
+```bash
+uv run symbiosis setup
+```
 
 The scheduler loads all instance configs from `config/instances/`, registers their species, and runs a unified loop that:
 - Polls messaging adapters for incoming events (reactive triggers)

@@ -1,0 +1,23 @@
+species_id: thrivemind
+intelligence_type: hivemind
+operating_mode: hybrid
+pipeline:
+  on_inbox:
+    steps:
+    - stage: distill_messages
+      inputs:
+        messages: inbox.messages
+      outputs:
+        summary: memory.inbox_summary
+    - stage: run_subconscious
+      inputs:
+        session_type: hivemind
+  on_schedule:
+    cron: '*/15 * * * *'
+    steps:
+    - stage: distill_memory
+      outputs:
+        digest: memory.collective_digest
+    - stage: run_react
+      inputs:
+        session_type: hivemind
