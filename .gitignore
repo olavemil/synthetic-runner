@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+
+# Testing
+.pytest_cache/
+
+# Secrets
+.env
+
+# Instance configs (contain auth tokens, entity IDs)
+config/instances/*.yaml
+!config/instances/example.yaml
+
+# Runtime data — databases, instance memory, inboxes
+*.db
+instances/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store

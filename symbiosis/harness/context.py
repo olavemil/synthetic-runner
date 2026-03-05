@@ -1,0 +1,141 @@
+"""InstanceContext — the core abstraction through which Species code interacts with infrastructure."""
+
+from __future__ import annotations
+
+from typing import Any, TYPE_CHECKING
+
+from symbiosis.harness.storage import NamespacedStorage
+from symbiosis.harness.store import NamespacedStore, StoreDB
+from symbiosis.harness.mailbox import Mailbox
+
+if TYPE_CHECKING:
+    from symbiosis.harness.providers import LLMProvider, LLMResponse
+    from symbiosis.harness.adapters import Event, MessagingAdapter
+    from symbiosis.harness.config import InstanceConfig
+
+
+class InstanceContext:
+    def __init__(
+        self,
+        instance_id: str,
+        species_id: str,
+        storage: NamespacedStorage,
+        provider: LLMProvider,
+        default_model: str,
+        adapter: MessagingAdapter | None,
+        space_map: dict[str, str],
+        store_db: StoreDB,
+        mailbox: Mailbox,
+        instance_config: InstanceConfig,
+    ):
+        self._instance_id = instance_id
+        self._species_id = species_id
+        self._storage = storage
+        self._provider = provider
+        self._default_model = default_model
+        self._adapter = adapter
+        self._space_map = space_map
+        self._store_db = store_db
+        self._mailbox = mailbox
+        self._instance_config = instance_config
+
+    @property
+    def instance_id(self) -> str:
+        return self._instance_id
+
+    @property
+    def species_id(self) -> str:
+        return self._species_id
+
+    # --- Storage ---
+
+    def read(self, path: str) -> str:
+        return self._storage.read(path)
+
+    def write(self, path: str, content: str) -> None:
+        self._storage.write(path, content)
+
+    def list(self, prefix: str = "") -> list[str]:
+        return self._storage.list(prefix)
+
+    def exists(self, path: str) -> bool:
+        return self._storage.exists(path)
+
+    # --- Config (read-only) ---
+
+    def config(self, key: str) -> Any:
+        if key == "instance_id":
+            return self._instance_id
+        if key == "species":
+            return self._species_id
+        if key == "provider":
+            return self._instance_config.provider
+        if key == "model":
+            return self._instance_config.model
+        if key == "entity_id" and self._instance_config.messaging:
+            return self._instance_config.messaging.entity_id
+        if key in self._instance_config.extra:
+            return self._instance_config.extra[key]
+        return None
+
+    # --- LLM ---
+
+    def llm(
+        self,
+        messages: list[dict],
+        *,
+        model: str | None = None,
+        system: str | None = None,
+        tools: list[dict] | None = None,
+        tool_choice: str | dict | None = None,
+        max_tokens: int = 1024,
+        caller: str = "?",
+    ) -> LLMResponse:
+        return self._provider.create(
+            model=model or self._default_model,
+            messages=messages,
+            system=system,
+            tools=tools,
+            tool_choice=tool_choice,
+            max_tokens=max_tokens,
+            caller=caller,
+        )
+
+    # --- Messaging ---
+
+    def _resolve_space(self, space: str) -> str:
+        handle = self._space_map.get(space)
+        if handle is None:
+            raise KeyError(f"Space '{space}' not mapped for instance '{self._instance_id}'")
+        return handle
+
+    def send(self, space: str, message: str, reply_to: str | None = None) -> str:
+        if self._adapter is None:
+            raise RuntimeError(f"No messaging adapter configured for instance '{self._instance_id}'")
+        return self._adapter.send(self._resolve_space(space), message, reply_to)
+
+    def poll(self, space: str, since_token: str | None = None) -> tuple[list[Event], str]:
+        if self._adapter is None:
+            raise RuntimeError(f"No messaging adapter configured for instance '{self._instance_id}'")
+        return self._adapter.poll(self._resolve_space(space), since_token)
+
+    def get_space_context(self, space: str) -> dict:
+        if self._adapter is None:
+            return {}
+        return self._adapter.get_space_context(self._resolve_space(space))
+
+    # --- Inter-instance ---
+
+    def send_to(self, target_instance_id: str, message: str) -> None:
+        self._mailbox.send_to(target_instance_id, message)
+
+    def read_inbox(self) -> list[dict]:
+        return self._mailbox.read_inbox()
+
+    # --- Structured store ---
+
+    def store(self, namespace: str) -> NamespacedStore:
+        return NamespacedStore(self._store_db, f"instance:{self._instance_id}:{namespace}")
+
+    def shared_store(self, namespace: str) -> NamespacedStore:
+        return NamespacedStore(self._store_db, f"species:{self._species_id}:{namespace}")
