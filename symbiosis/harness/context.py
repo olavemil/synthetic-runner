@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, TYPE_CHECKING
 
 from symbiosis.harness.storage import NamespacedStorage
@@ -12,6 +13,8 @@ if TYPE_CHECKING:
     from symbiosis.harness.providers import LLMProvider, LLMResponse
     from symbiosis.harness.adapters import Event, MessagingAdapter
     from symbiosis.harness.config import InstanceConfig
+
+logger = logging.getLogger(__name__)
 
 
 class InstanceContext:
@@ -104,15 +107,39 @@ class InstanceContext:
     # --- Messaging ---
 
     def _resolve_space(self, space: str) -> str:
+        # Preferred path: logical space name configured on the instance.
         handle = self._space_map.get(space)
         if handle is None:
-            raise KeyError(f"Space '{space}' not mapped for instance '{self._instance_id}'")
+            # Accept direct adapter handle (e.g. "!room:matrix.org") to allow
+            # species/tool outputs to pass through concrete room IDs.
+            if space in self._space_map.values():
+                return space
+            known_spaces = ", ".join(sorted(self._space_map)) or "(none)"
+            raise KeyError(
+                f"Space '{space}' not mapped for instance '{self._instance_id}'. "
+                f"Known spaces: {known_spaces}"
+            )
         return handle
 
     def send(self, space: str, message: str, reply_to: str | None = None) -> str:
         if self._adapter is None:
             raise RuntimeError(f"No messaging adapter configured for instance '{self._instance_id}'")
-        return self._adapter.send(self._resolve_space(space), message, reply_to)
+        try:
+            resolved_space = self._resolve_space(space)
+        except KeyError:
+            fallback_handle = self._space_map.get("main")
+            if fallback_handle is None and len(self._space_map) == 1:
+                fallback_handle = next(iter(self._space_map.values()))
+            if fallback_handle is None:
+                raise
+            logger.warning(
+                "Space '%s' not mapped for instance '%s'; falling back to '%s'",
+                space,
+                self._instance_id,
+                fallback_handle,
+            )
+            resolved_space = fallback_handle
+        return self._adapter.send(resolved_space, message, reply_to)
 
     def poll(self, space: str, since_token: str | None = None) -> tuple[list[Event], str]:
         if self._adapter is None:
@@ -123,6 +150,10 @@ class InstanceContext:
         if self._adapter is None:
             return {}
         return self._adapter.get_space_context(self._resolve_space(space))
+
+    def list_spaces(self) -> list[str]:
+        """Return configured logical messaging space names."""
+        return sorted(self._space_map.keys())
 
     # --- Inter-instance ---
 

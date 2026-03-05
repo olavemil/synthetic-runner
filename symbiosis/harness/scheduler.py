@@ -168,12 +168,24 @@ class Scheduler:
 
                 try:
                     events, next_token = adapter.poll(handle, token)
+                    # Normalize adapter-level room handles to logical space names
+                    # before dispatching to species handlers.
+                    normalized_events = [
+                        type(evt)(
+                            event_id=evt.event_id,
+                            sender=evt.sender,
+                            body=evt.body,
+                            timestamp=evt.timestamp,
+                            room=space_name,
+                        )
+                        for evt in events
+                    ]
                     self._sync_tokens[instance_id][space_name] = next_token
 
-                    if events and token is not None:
+                    if normalized_events and token is not None:
                         # Only dispatch if we had a previous token (skip initial sync)
                         entity_id = instance_config.messaging.entity_id
-                        own_events = [e for e in events if e.sender != entity_id]
+                        own_events = [e for e in normalized_events if e.sender != entity_id]
                         if own_events:
                             self._dispatch(instance_id, "on_message", events=own_events)
                 except Exception:

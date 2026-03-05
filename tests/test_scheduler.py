@@ -155,6 +155,67 @@ class TestScheduler:
         scheduler.stop()
         assert scheduler._running is False
 
+    def test_poll_reactive_normalizes_room_to_logical_space(self, tmp_path):
+        from symbiosis.harness.adapters import Event
+
+        harness_config = HarnessConfig(
+            providers=[ProviderConfig(id="mock-provider", type="openai_compat", base_url="http://localhost", api_key="key")],
+            adapters=[AdapterConfig(id="matrix-main", type="matrix", homeserver="https://matrix.org")],
+            storage_dir="instances",
+            store_path="test.db",
+            poll_interval=1,
+        )
+        registry = Registry()
+        species = MockSpecies()
+        registry.register_species(species)
+        registry.register_instance(
+            InstanceConfig(
+                instance_id="test-1",
+                species="mock",
+                provider="mock-provider",
+                model="m",
+                messaging=MessagingConfig(
+                    adapter="matrix-main",
+                    entity_id="@bot:matrix.org",
+                    access_token="token",
+                    spaces=[SpaceMapping(name="main", handle="!room:matrix.org")],
+                ),
+            )
+        )
+
+        scheduler = Scheduler(
+            harness_config=harness_config,
+            registry=registry,
+            providers={"mock-provider": MagicMock()},
+            adapters={},
+            base_dir=tmp_path,
+        )
+
+        adapter = MagicMock()
+        adapter.poll.return_value = (
+            [
+                Event(event_id="1", sender="@user:matrix.org", body="hello", timestamp=1, room="!room:matrix.org"),
+                Event(event_id="2", sender="@bot:matrix.org", body="self", timestamp=2, room="!room:matrix.org"),
+            ],
+            "next-token",
+        )
+        scheduler._build_adapter = MagicMock(return_value=adapter)  # type: ignore[method-assign]
+
+        captured: list[list[Event]] = []
+
+        def fake_dispatch(instance_id, entry_point_name, **kwargs):  # noqa: ARG001
+            captured.append(kwargs["events"])
+
+        scheduler._dispatch = fake_dispatch  # type: ignore[method-assign]
+        scheduler._sync_tokens["test-1"] = {"main": "start-token"}
+
+        scheduler._poll_reactive()
+
+        assert len(captured) == 1
+        assert len(captured[0]) == 1
+        assert captured[0][0].sender == "@user:matrix.org"
+        assert captured[0][0].room == "main"
+
 
 class TestBuildProviders:
     def test_unknown_type_skipped(self):

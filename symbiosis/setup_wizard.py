@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+import inspect
 import re
 from pathlib import Path
 from typing import Callable
@@ -246,6 +248,327 @@ def _write_yaml(path: Path, data: dict) -> None:
         yaml.safe_dump(data, f, sort_keys=False)
 
 
+def _load_yaml(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    with open(path) as f:
+        return yaml.safe_load(f) or {}
+
+
+def _choice_index_for_value(
+    choices: list[tuple[str, str]],
+    value: str,
+    *,
+    fallback: int = 0,
+) -> int:
+    for idx, (_, candidate) in enumerate(choices):
+        if candidate == value:
+            return idx
+    return fallback
+
+
+def _extract_env_var_name(value: str | None) -> str | None:
+    if not value:
+        return None
+    match = re.fullmatch(r"\$\{(\w+)\}", value.strip())
+    return match.group(1) if match else None
+
+
+def _discover_available_species() -> list[str]:
+    try:
+        import pkgutil
+        import symbiosis.species as species_pkg
+        from symbiosis.species import Species
+    except Exception:
+        return ["draum"]
+
+    species_ids: set[str] = set()
+
+    for info in pkgutil.iter_modules(species_pkg.__path__):
+        if info.name.startswith("_"):
+            continue
+
+        module_name = f"{species_pkg.__name__}.{info.name}"
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:
+            continue
+
+        for _, cls in inspect.getmembers(module, inspect.isclass):
+            if cls.__module__ != module_name:
+                continue
+            if not issubclass(cls, Species) or cls is Species:
+                continue
+            try:
+                species_ids.add(cls().manifest().species_id)
+            except Exception:
+                continue
+
+    if not species_ids:
+        species_ids.add("draum")
+
+    return sorted(species_ids)
+
+
+def _choose_instance_action(
+    has_existing_instances: bool,
+    input_fn: PromptInput,
+    output_fn: PromptOutput,
+) -> str:
+    if has_existing_instances:
+        return _ask_choice(
+            "Instance setup",
+            [
+                ("Create a new instance", "create"),
+                ("Configure an existing instance", "configure"),
+                ("Skip instance setup", "skip"),
+            ],
+            input_fn,
+            output_fn,
+            default_index=0,
+        )
+
+    return _ask_choice(
+        "No non-template instances found. Instance setup",
+        [("Create the first instance", "create"), ("Skip instance setup", "skip")],
+        input_fn,
+        output_fn,
+        default_index=0,
+    )
+
+
+def _configure_instance(
+    *,
+    existing_path: Path | None,
+    instances_dir: Path,
+    pipelines_dir: Path,
+    providers: list[dict],
+    adapters: list[dict],
+    harness: dict,
+    existing_env: dict[str, str],
+    env_updates: dict[str, str],
+    species_ids: list[str],
+    input_fn: PromptInput,
+    output_fn: PromptOutput,
+) -> None:
+    existing_data = _load_yaml(existing_path) if existing_path else {}
+
+    if existing_path:
+        instance_id = existing_path.stem
+        output_fn(f"Configuring instance: {instance_id}")
+    else:
+        raw_name = _ask_text(
+            "Instance name",
+            input_fn,
+            output_fn,
+            default="agent-1",
+            allow_empty=False,
+        )
+        instance_id = _slugify_instance_name(raw_name)
+
+    if not providers:
+        _upsert_item(
+            providers,
+            {
+                "id": "lmstudio",
+                "type": "openai_compat",
+                "base_url": "${LMSTUDIO_BASE_URL}",
+                "api_key": "lm-studio",
+            },
+        )
+        harness["providers"] = providers
+
+    provider_ids = [p["id"] for p in providers if p.get("id")]
+    if not provider_ids:
+        provider_ids = ["lmstudio"]
+
+    species_pool = set(species_ids)
+    existing_species = existing_data.get("species")
+    if existing_species:
+        species_pool.add(existing_species)
+    species_choices = [(sid, sid) for sid in sorted(species_pool)]
+
+    intelligence_defaults = existing_data.get("intelligence", {}) if isinstance(existing_data.get("intelligence"), dict) else {}
+    default_species = existing_data.get("species", species_choices[0][1])
+    default_intelligence_type = intelligence_defaults.get("type", "persistent")
+    default_operating_mode = intelligence_defaults.get("operating_mode", "hybrid")
+    default_provider = existing_data.get("provider", provider_ids[0])
+    existing_model = existing_data.get("model")
+
+    selected_species = _ask_choice(
+        "Species",
+        species_choices,
+        input_fn,
+        output_fn,
+        default_index=_choice_index_for_value(species_choices, default_species),
+    )
+    intelligence_type = _ask_choice(
+        "Intelligence type",
+        _INTELLIGENCE_TYPES,
+        input_fn,
+        output_fn,
+        default_index=_choice_index_for_value(_INTELLIGENCE_TYPES, default_intelligence_type),
+    )
+    operating_mode = _ask_choice(
+        "Operating mode",
+        _OPERATING_MODES,
+        input_fn,
+        output_fn,
+        default_index=_choice_index_for_value(_OPERATING_MODES, default_operating_mode, fallback=1),
+    )
+    selected_provider = _ask_choice(
+        "Default provider for this instance",
+        [(pid, pid) for pid in provider_ids],
+        input_fn,
+        output_fn,
+        default_index=_choice_index_for_value([(pid, pid) for pid in provider_ids], default_provider),
+    )
+    if existing_model and default_provider == selected_provider:
+        model_default = str(existing_model)
+    else:
+        model_default = _default_model_for_provider(selected_provider)
+    model = _ask_text(
+        "Model",
+        input_fn,
+        output_fn,
+        default=model_default,
+        allow_empty=False,
+    )
+
+    existing_messaging = existing_data.get("messaging", {}) if isinstance(existing_data.get("messaging"), dict) else {}
+    configure_messaging = _ask_choice(
+        "Configure Matrix messaging for this instance now?",
+        [("No", "no"), ("Yes", "yes")],
+        input_fn,
+        output_fn,
+        default_index=1 if existing_messaging else 0,
+    )
+
+    messaging: dict | None = None
+    if configure_messaging == "yes":
+        has_matrix = any(a.get("id") == "matrix-main" for a in adapters)
+        if not has_matrix:
+            _upsert_item(
+                adapters,
+                {
+                    "id": "matrix-main",
+                    "type": "matrix",
+                    "homeserver": "${MATRIX_HOMESERVER}",
+                },
+            )
+            harness["adapters"] = adapters
+
+        existing_spaces = existing_messaging.get("spaces", []) if isinstance(existing_messaging.get("spaces"), list) else []
+        default_room_handle = ""
+        for space in existing_spaces:
+            if isinstance(space, dict) and space.get("name") == "main" and space.get("handle"):
+                default_room_handle = str(space["handle"])
+                break
+        if not default_room_handle and existing_spaces:
+            first = existing_spaces[0]
+            if isinstance(first, dict) and first.get("handle"):
+                default_room_handle = str(first["handle"])
+
+        existing_token_var = _extract_env_var_name(existing_messaging.get("access_token"))
+        token_env_var_default = existing_token_var or f"{instance_id.upper().replace('-', '_')}_MATRIX_TOKEN"
+
+        entity_id = _ask_text(
+            "Matrix entity_id (optional, e.g. @bot:matrix.org)",
+            input_fn,
+            output_fn,
+            default=str(existing_messaging.get("entity_id", "")),
+            allow_empty=True,
+        )
+        room_handle = _ask_text(
+            "Main room handle (optional, e.g. !room:matrix.org)",
+            input_fn,
+            output_fn,
+            default=default_room_handle,
+            allow_empty=True,
+        )
+        token_env_var = _ask_text(
+            "Matrix token env var name",
+            input_fn,
+            output_fn,
+            default=token_env_var_default,
+            allow_empty=False,
+        )
+        token_value = _ask_text(
+            f"{token_env_var} (optional access token)",
+            input_fn,
+            output_fn,
+            default=existing_env.get(token_env_var, ""),
+            allow_empty=True,
+        )
+        env_updates[token_env_var] = token_value
+
+        spaces = []
+        if room_handle:
+            spaces.append({"name": "main", "handle": room_handle})
+
+        messaging = {
+            "adapter": "matrix-main",
+            "entity_id": entity_id,
+            "access_token": f"${{{token_env_var}}}",
+            "spaces": spaces,
+        }
+
+    instance_data: dict = {
+        "species": selected_species,
+        "provider": selected_provider,
+        "model": model,
+        "intelligence": {
+            "type": intelligence_type,
+            "operating_mode": operating_mode,
+        },
+        "pipeline": {
+            "file": f"config/pipelines/{instance_id}.yaml",
+        },
+    }
+    if operating_mode in {"scheduled", "hybrid"}:
+        instance_data["schedule"] = {"heartbeat": _default_heartbeat(intelligence_type)}
+    if messaging is not None:
+        instance_data["messaging"] = messaging
+
+    instance_path = instances_dir / f"{instance_id}.yaml"
+    if existing_path is None and instance_path.exists():
+        overwrite = _ask_choice(
+            f"{instance_path.name} already exists. Overwrite?",
+            [("No", "no"), ("Yes", "yes")],
+            input_fn,
+            output_fn,
+            default_index=0,
+        )
+        if overwrite == "no":
+            output_fn("Skipped writing instance config.")
+            return
+
+    _write_yaml(instance_path, instance_data)
+    output_fn(f"Wrote {instance_path}")
+
+    pipeline_path = pipelines_dir / f"{instance_id}.yaml"
+    write_pipeline = "yes"
+    if pipeline_path.exists() and existing_path is not None:
+        write_pipeline = _ask_choice(
+            "Pipeline profile already exists. Regenerate from this Q&A?",
+            [("No", "no"), ("Yes", "yes")],
+            input_fn,
+            output_fn,
+            default_index=0,
+        )
+
+    if write_pipeline == "yes":
+        pipeline_data = _build_pipeline_yaml(
+            instance_id=instance_id,
+            intelligence_type=intelligence_type,
+            operating_mode=operating_mode,
+        )
+        _write_yaml(pipeline_path, pipeline_data)
+        output_fn(f"Wrote {pipeline_path}")
+    else:
+        output_fn(f"Kept existing {pipeline_path}")
+
+
 def run_setup(
     base_dir: str | Path = ".",
     *,
@@ -359,191 +682,54 @@ def run_setup(
         p for p in instances_dir.glob("*.yaml")
         if not _is_template_instance_file(p)
     )
-    if not existing_instances:
-        create_first = _ask_choice(
-            "No species instances found. Create the first instance now?",
-            [("Yes", "yes"), ("No", "no")],
+    discovered_species = _discover_available_species()
+    for instance_path in existing_instances:
+        data = _load_yaml(instance_path)
+        species_id = data.get("species")
+        if species_id:
+            discovered_species.append(str(species_id))
+    species_ids = sorted(set(discovered_species))
+
+    instance_action = _choose_instance_action(bool(existing_instances), input_fn, output_fn)
+    if instance_action == "create":
+        _configure_instance(
+            existing_path=None,
+            instances_dir=instances_dir,
+            pipelines_dir=pipelines_dir,
+            providers=providers,
+            adapters=adapters,
+            harness=harness,
+            existing_env=existing_env,
+            env_updates=env_updates,
+            species_ids=species_ids,
+            input_fn=input_fn,
+            output_fn=output_fn,
+        )
+    elif instance_action == "configure":
+        existing_choices = [(p.stem, str(p)) for p in existing_instances]
+        selected = _ask_choice(
+            "Select instance to configure",
+            existing_choices,
             input_fn,
             output_fn,
             default_index=0,
         )
-
-        if create_first == "yes":
-            raw_name = _ask_text(
-                "Instance name",
-                input_fn,
-                output_fn,
-                default="agent-1",
-                allow_empty=False,
-            )
-            instance_id = _slugify_instance_name(raw_name)
-
-            intelligence_type = _ask_choice(
-                "Intelligence type",
-                _INTELLIGENCE_TYPES,
-                input_fn,
-                output_fn,
-                default_index=0,
-            )
-            operating_mode = _ask_choice(
-                "Operating mode",
-                _OPERATING_MODES,
-                input_fn,
-                output_fn,
-                default_index=1,
-            )
-
-            if not providers:
-                _upsert_item(
-                    providers,
-                    {
-                        "id": "lmstudio",
-                        "type": "openai_compat",
-                        "base_url": "${LMSTUDIO_BASE_URL}",
-                        "api_key": "lm-studio",
-                    },
-                )
-                harness["providers"] = providers
-
-            provider_ids = [p["id"] for p in providers if p.get("id")]
-            if not provider_ids:
-                provider_ids = ["lmstudio"]
-            selected_provider = _ask_choice(
-                "Default provider for this instance",
-                [(pid, pid) for pid in provider_ids],
-                input_fn,
-                output_fn,
-                default_index=0,
-            )
-            model = _ask_text(
-                "Model",
-                input_fn,
-                output_fn,
-                default=_default_model_for_provider(selected_provider),
-                allow_empty=False,
-            )
-
-            configure_messaging = _ask_choice(
-                "Configure Matrix messaging for this instance now?",
-                [("No", "no"), ("Yes", "yes")],
-                input_fn,
-                output_fn,
-                default_index=0,
-            )
-
-            messaging: dict | None = None
-            if configure_messaging == "yes":
-                has_matrix = any(a.get("id") == "matrix-main" for a in adapters)
-                if not has_matrix:
-                    _upsert_item(
-                        adapters,
-                        {
-                            "id": "matrix-main",
-                            "type": "matrix",
-                            "homeserver": "${MATRIX_HOMESERVER}",
-                        },
-                    )
-                    harness["adapters"] = adapters
-
-                entity_id = _ask_text(
-                    "Matrix entity_id (optional, e.g. @bot:matrix.org)",
-                    input_fn,
-                    output_fn,
-                    default="",
-                    allow_empty=True,
-                )
-                room_handle = _ask_text(
-                    "Main room handle (optional, e.g. !room:matrix.org)",
-                    input_fn,
-                    output_fn,
-                    default="",
-                    allow_empty=True,
-                )
-                token_env_var = f"{instance_id.upper().replace('-', '_')}_MATRIX_TOKEN"
-                token_value = _ask_text(
-                    f"{token_env_var} (optional access token)",
-                    input_fn,
-                    output_fn,
-                    default=existing_env.get(token_env_var, ""),
-                    allow_empty=True,
-                )
-                env_updates[token_env_var] = token_value
-
-                spaces = []
-                if room_handle:
-                    spaces.append({"name": "main", "handle": room_handle})
-
-                messaging = {
-                    "adapter": "matrix-main",
-                    "entity_id": entity_id,
-                    "access_token": f"${{{token_env_var}}}",
-                    "spaces": spaces,
-                }
-
-            instance_path = instances_dir / f"{instance_id}.yaml"
-            if instance_path.exists():
-                overwrite = _ask_choice(
-                    f"{instance_path.name} already exists. Overwrite?",
-                    [("No", "no"), ("Yes", "yes")],
-                    input_fn,
-                    output_fn,
-                    default_index=0,
-                )
-                if overwrite == "no":
-                    output_fn("Skipped writing instance config.")
-                else:
-                    instance_data = {
-                        "species": "draum",
-                        "provider": selected_provider,
-                        "model": model,
-                        "intelligence": {
-                            "type": intelligence_type,
-                            "operating_mode": operating_mode,
-                        },
-                        "pipeline": {
-                            "file": f"config/pipelines/{instance_id}.yaml",
-                        },
-                    }
-                    if operating_mode in {"scheduled", "hybrid"}:
-                        instance_data["schedule"] = {
-                            "heartbeat": _default_heartbeat(intelligence_type)
-                        }
-                    if messaging is not None:
-                        instance_data["messaging"] = messaging
-                    _write_yaml(instance_path, instance_data)
-                    output_fn(f"Wrote {instance_path}")
-            else:
-                instance_data = {
-                    "species": "draum",
-                    "provider": selected_provider,
-                    "model": model,
-                    "intelligence": {
-                        "type": intelligence_type,
-                        "operating_mode": operating_mode,
-                    },
-                    "pipeline": {
-                        "file": f"config/pipelines/{instance_id}.yaml",
-                    },
-                }
-                if operating_mode in {"scheduled", "hybrid"}:
-                    instance_data["schedule"] = {
-                        "heartbeat": _default_heartbeat(intelligence_type)
-                    }
-                if messaging is not None:
-                    instance_data["messaging"] = messaging
-                _write_yaml(instance_path, instance_data)
-                output_fn(f"Wrote {instance_path}")
-
-            pipeline_path = pipelines_dir / f"{instance_id}.yaml"
-            pipeline_data = _build_pipeline_yaml(
-                instance_id=instance_id,
-                intelligence_type=intelligence_type,
-                operating_mode=operating_mode,
-            )
-            _write_yaml(pipeline_path, pipeline_data)
-            output_fn(f"Wrote {pipeline_path}")
+        selected_path = Path(selected)
+        _configure_instance(
+            existing_path=selected_path,
+            instances_dir=instances_dir,
+            pipelines_dir=pipelines_dir,
+            providers=providers,
+            adapters=adapters,
+            harness=harness,
+            existing_env=existing_env,
+            env_updates=env_updates,
+            species_ids=species_ids,
+            input_fn=input_fn,
+            output_fn=output_fn,
+        )
     else:
-        output_fn("Existing instance configs found; skipped first-species bootstrap.")
+        output_fn("Skipped instance setup.")
 
     _write_harness_yaml(harness_path, harness)
     _upsert_env_values(env_path, env_updates)

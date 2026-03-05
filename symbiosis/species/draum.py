@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from symbiosis.species import Species, SpeciesManifest, EntryPoint
@@ -22,6 +23,8 @@ if TYPE_CHECKING:
     from symbiosis.harness.adapters import Event
     from symbiosis.harness.context import InstanceContext
 
+logger = logging.getLogger(__name__)
+
 
 DEFAULT_FILES = {
     "thinking.md": "# Thinking\n",
@@ -39,6 +42,12 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
     if not events:
         return
 
+    available_spaces = set(ctx.list_spaces())
+    event_spaces = {evt.room for evt in events if evt.room}
+    if not available_spaces:
+        available_spaces = {space for space in event_spaces if isinstance(space, str)}
+    fallback_space = "main" if "main" in available_spaces else next(iter(available_spaces), "main")
+
     memory = read_memory(ctx)
     sender_ids = list({evt.sender for evt in events})
     relationships_block = format_relationships_block(ctx, sender_ids)
@@ -55,10 +64,17 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
 
     # 2. Plan response
     rooms_to_respond = gut.get("rooms_to_respond", [])
+    if not isinstance(rooms_to_respond, list):
+        rooms_to_respond = []
+    candidate_rooms = [room for room in rooms_to_respond if isinstance(room, str)]
+    valid_rooms = [room for room in candidate_rooms if room in available_spaces]
+    if not valid_rooms:
+        valid_rooms = sorted(event_spaces & available_spaces) if available_spaces else [fallback_space]
+
     messages_by_room: dict[str, list[Event]] = {}
     room_contexts: dict[str, dict] = {}
 
-    for room in rooms_to_respond:
+    for room in valid_rooms:
         room_events = [e for e in events if e.room == room or not e.room]
         if room_events:
             messages_by_room[room] = room_events
@@ -76,7 +92,16 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
 
     # 3. Compose and send for each room
     for room_plan in plan.get("rooms", []):
-        space = room_plan.get("space", "main")
+        raw_space = room_plan.get("space", fallback_space)
+        space = raw_space.strip() if isinstance(raw_space, str) else fallback_space
+        if space not in available_spaces:
+            logger.warning(
+                "Plan selected invalid space '%s' for instance '%s'; using '%s'",
+                raw_space,
+                ctx.instance_id,
+                fallback_space,
+            )
+            space = fallback_space
         room_context = room_contexts.get(space)
 
         message = compose_response(
@@ -86,7 +111,31 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
             memory=memory,
         )
         if message:
-            ctx.send(space, message)
+            try:
+                ctx.send(space, message)
+            except KeyError:
+                # Models occasionally emit handles/domains instead of configured
+                # logical space names; fall back to "main" when available.
+                if space != "main":
+                    try:
+                        ctx.send("main", message)
+                        logger.warning(
+                            "Space '%s' not mapped for instance '%s'; sent to 'main' instead",
+                            space,
+                            ctx.instance_id,
+                        )
+                    except KeyError:
+                        logger.warning(
+                            "Space '%s' not mapped for instance '%s' and no 'main' space configured; skipping send",
+                            space,
+                            ctx.instance_id,
+                        )
+                else:
+                    logger.warning(
+                        "Space '%s' not mapped for instance '%s'; skipping send",
+                        space,
+                        ctx.instance_id,
+                    )
 
     # 4. Post-session processes
     run_subconscious(ctx, "reactive")

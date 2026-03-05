@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import importlib
+import inspect
 import logging
+import pkgutil
 import sys
 from pathlib import Path
 
 from symbiosis.harness.config import load_harness_config, load_instance_config
 from symbiosis.harness.registry import Registry
 from symbiosis.harness.scheduler import Scheduler, build_providers, build_adapters
+from symbiosis.species import Species
 from symbiosis.setup_wizard import run_setup
 
 _INSTANCE_TEMPLATE_STEMS = {"example", "sample", "template"}
@@ -17,9 +21,27 @@ _INSTANCE_TEMPLATE_STEMS = {"example", "sample", "template"}
 
 def load_species(species_id: str):
     """Load a species by ID. Returns a Species instance."""
-    if species_id == "draum":
-        from symbiosis.species.draum import DraumSpecies
-        return DraumSpecies()
+    import symbiosis.species as species_pkg
+
+    for mod_info in pkgutil.iter_modules(species_pkg.__path__):
+        if mod_info.name.startswith("_"):
+            continue
+
+        module_name = f"{species_pkg.__name__}.{mod_info.name}"
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:
+            continue
+
+        for _, cls in inspect.getmembers(module, inspect.isclass):
+            if cls.__module__ != module_name:
+                continue
+            if not issubclass(cls, Species) or cls is Species:
+                continue
+            instance = cls()
+            if instance.manifest().species_id == species_id:
+                return instance
+
     raise ValueError(f"Unknown species: {species_id}")
 
 

@@ -85,9 +85,52 @@ class TestInstanceContext:
         adapter.send.assert_called_once_with("!room:test", "hello", None)
         assert result == "$event1"
 
-    def test_send_unknown_space(self, tmp_path):
+    def test_send_unknown_space_falls_back_to_main(self, tmp_path):
         adapter = MagicMock()
+        adapter.send.return_value = "$event-fallback"
         ctx = make_ctx(tmp_path, adapter=adapter)
+        result = ctx.send("unknown", "hi")
+        adapter.send.assert_called_once_with("!room:test", "hi", None)
+        assert result == "$event-fallback"
+
+    def test_send_direct_handle(self, tmp_path):
+        adapter = MagicMock()
+        adapter.send.return_value = "$event2"
+        ctx = make_ctx(tmp_path, adapter=adapter)
+        result = ctx.send("!room:test", "hello")
+        adapter.send.assert_called_once_with("!room:test", "hello", None)
+        assert result == "$event2"
+
+    def test_send_unknown_space_raises_without_any_fallback(self, tmp_path):
+        adapter = MagicMock()
+        storage = NamespacedStorage(tmp_path / "instances", "test-2")
+        provider = MagicMock()
+        store_db = open_store()
+        mailbox = Mailbox(tmp_path / "instances", "test-2")
+        instance_config = InstanceConfig(
+            instance_id="test-2",
+            species="draum",
+            provider="test-provider",
+            model="test-model",
+            messaging=MessagingConfig(
+                adapter="test-adapter",
+                entity_id="@bot:test",
+                access_token="test-token",
+                spaces=[],
+            ),
+        )
+        ctx = InstanceContext(
+            instance_id="test-2",
+            species_id="draum",
+            storage=storage,
+            provider=provider,
+            default_model="test-model",
+            adapter=adapter,
+            space_map={},
+            store_db=store_db,
+            mailbox=mailbox,
+            instance_config=instance_config,
+        )
         with pytest.raises(KeyError, match="unknown"):
             ctx.send("unknown", "hi")
 

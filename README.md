@@ -35,7 +35,8 @@ uv run symbiosis setup
 ```
 
 This configures `.env`, `config/harness.yaml`, and (if none exists) your first
-instance plus a starter pipeline profile.
+instance plus a starter pipeline profile. If instances already exist, the wizard
+lets you create a new instance or reconfigure an existing one.
 
 2. **Or configure manually**:
 
