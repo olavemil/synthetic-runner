@@ -2,30 +2,21 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
+from symbiosis.toolkit.identity import Identity
 from symbiosis.toolkit.hecate import (
-    Voice,
     HecateConfig,
     load_config,
-    vote_response,
 )
 
 
 class DummyCtx:
-    def __init__(self, hecate_cfg=None, vote_choice: int | None = None):
+    def __init__(self, hecate_cfg=None):
         self._hecate_cfg = hecate_cfg or {}
-        self._vote_choice = vote_choice
 
     def config(self, key: str):
         if key == "hecate":
             return self._hecate_cfg
         return None
-
-    def llm(self, messages, **kwargs):
-        if self._vote_choice is not None:
-            return SimpleNamespace(message=f'{{"choice": {self._vote_choice}}}')
-        return SimpleNamespace(message="")
 
 
 class TestLoadConfig:
@@ -52,6 +43,17 @@ class TestLoadConfig:
         assert cfg.thinking_iterations == 3
         assert cfg.voice_space == "chat"
 
+    def test_voices_are_identity_instances(self):
+        ctx = DummyCtx(
+            hecate_cfg={
+                "voices": [
+                    {"name": "Aria", "model": "m", "personality": "p"},
+                ],
+            }
+        )
+        cfg = load_config(ctx)
+        assert isinstance(cfg.voices[0], Identity)
+
     def test_defaults_when_empty(self):
         ctx = DummyCtx()
         cfg = load_config(ctx)
@@ -65,72 +67,29 @@ class TestLoadConfig:
         assert cfg.thinking_iterations == 1
 
 
-class TestVoteResponse:
-    def _voices(self) -> list[Voice]:
-        return [
-            Voice(name="Aria", model="m", personality="p"),
-            Voice(name="Sable", model="m", personality="p"),
-            Voice(name="Lune", model="m", personality="p"),
-        ]
-
-    def _suggestions(self) -> list[dict]:
-        return [
-            {"text": "reply A", "argument": "arg A"},
-            {"text": "reply B", "argument": "arg B"},
-            {"text": "reply C", "argument": "arg C"},
-        ]
-
-    def test_never_returns_own_index(self):
-        suggestions = self._suggestions()
-        voices = self._voices()
-        # Try all three voices as voters
-        for my_idx in range(3):
-            ctx = DummyCtx(vote_choice=my_idx)  # LLM "tries" to vote for own index
-            result = vote_response(ctx, voices[my_idx], suggestions, my_idx)
-            assert result != my_idx, f"Voice {my_idx} voted for itself"
-
-    def test_returns_valid_other_index(self):
-        suggestions = self._suggestions()
-        voices = self._voices()
-        for my_idx in range(3):
-            ctx = DummyCtx(vote_choice=(my_idx + 1) % 3)
-            result = vote_response(ctx, voices[my_idx], suggestions, my_idx)
-            assert result != my_idx
-            assert 0 <= result < 3
-
-    def test_falls_back_on_invalid_llm_response(self):
-        """If LLM returns garbage, falls back to first other index."""
-        ctx = DummyCtx()
-        ctx._vote_choice = None
-
-        def broken_llm(messages, **kwargs):
-            return SimpleNamespace(message="not json at all")
-
-        ctx.llm = broken_llm
-        voice = Voice(name="Aria", model="m", personality="p")
-        suggestions = self._suggestions()
-        result = vote_response(ctx, voice, suggestions, my_idx=0)
-        assert result != 0  # should not be own index
-        assert result in [1, 2]
-
-
 class TestVoteTally:
-    """Test the vote tally logic (inline, as the tally is done in the species)."""
+    """Test the vote tally logic (inline, as the tally is now in voting.py)."""
 
     def test_two_vote_winner(self):
-        vote_results = [1, 1, 0]  # voices 0 and 1 vote for index 1; voice 2 votes for index 0
-        vote_counts = [0, 0, 0]
-        for v in vote_results:
-            vote_counts[v] += 1
-        max_votes = max(vote_counts)
-        assert max_votes == 2
-        winner_idx = vote_counts.index(max_votes)
-        assert winner_idx == 1
+        # Simulating: voices 0 and 1 vote for Sable; voice 2 votes for Aria
+        from symbiosis.toolkit.voting import borda_tally
+        candidates = {"Aria": "text a", "Sable": "text b", "Lune": "text c"}
+        votes = {
+            "Aria": ["Sable"],   # Aria votes for Sable
+            "Sable": ["Aria"],   # Sable votes for Aria (exclude_own)
+            "Lune": ["Sable"],   # Lune votes for Sable
+        }
+        tally = borda_tally(candidates, votes)
+        assert tally["winner_member"] == "Sable"
 
     def test_three_way_tie(self):
-        vote_results = [0, 1, 2]  # each voice voted for a different suggestion
-        vote_counts = [0, 0, 0]
-        for v in vote_results:
-            vote_counts[v] += 1
-        max_votes = max(vote_counts)
-        assert max_votes == 1  # tie
+        from symbiosis.toolkit.voting import borda_tally
+        candidates = {"Aria": "text a", "Sable": "text b", "Lune": "text c"}
+        # Each voice votes for a different candidate → all same score
+        votes = {
+            "Aria": ["Sable"],
+            "Sable": ["Lune"],
+            "Lune": ["Aria"],
+        }
+        tally = borda_tally(candidates, votes)
+        assert tally["is_tie"] is True

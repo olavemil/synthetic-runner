@@ -1,32 +1,30 @@
-"""Single-instance colony toolkit for Thrivemind."""
+"""Single-instance colony toolkit for Thrivemind — colony biology only."""
 
 from __future__ import annotations
 
 import json
-import math
 import random
 import time
 import uuid
-from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+
+from symbiosis.toolkit.identity import (
+    AXES,
+    AXIS_NAMES,
+    Identity,
+    format_persona,
+    parse_model,
+)
+from symbiosis.toolkit.voting import approval_weights, weighted_sample
+from symbiosis.toolkit.deliberate import generate_with_identity
 
 if TYPE_CHECKING:
     from symbiosis.harness.context import InstanceContext
 
+# Backward-compat alias: colony individuals ARE Identity objects
+Individual = Identity
+
 COLONY_NAMESPACE = "colony"
-
-# Six personality axes — (positive_pole, negative_pole)
-AXES: list[tuple[str, str]] = [
-    ("conservative", "liberal"),
-    ("simple", "complex"),
-    ("optimistic", "pessimistic"),
-    ("extrovert", "introvert"),
-    ("cautious", "bold"),
-    ("analytical", "emotional"),
-]
-
-# Axis names used as keys
-AXIS_NAMES = [f"{a}_{b}" for a, b in AXES]
 
 
 # ---------------------------------------------------------------------------
@@ -34,24 +32,26 @@ AXIS_NAMES = [f"{a}_{b}" for a, b in AXES]
 # ---------------------------------------------------------------------------
 
 
-@dataclass
 class ThrivemindConfig:
-    colony_size: int = 12
-    suggestion_fraction: float = 0.5
-    approval_threshold: int = 3
-    consensus_threshold: float = 0.6
-    round_timeout_s: int = 30
-    suggestion_model: str = ""
-    writer_model: str = ""
-    voice_space: str = "main"
-
-
-@dataclass
-class Individual:
-    id: str
-    dims: dict[str, float]
-    approval: int = 0
-    created_at: int = field(default_factory=lambda: int(time.time()))
+    def __init__(
+        self,
+        colony_size: int = 12,
+        suggestion_fraction: float = 0.5,
+        approval_threshold: int = 3,
+        consensus_threshold: float = 0.6,
+        round_timeout_s: int = 30,
+        suggestion_model: str = "",
+        writer_model: str = "",
+        voice_space: str = "main",
+    ):
+        self.colony_size = colony_size
+        self.suggestion_fraction = suggestion_fraction
+        self.approval_threshold = approval_threshold
+        self.consensus_threshold = consensus_threshold
+        self.round_timeout_s = round_timeout_s
+        self.suggestion_model = suggestion_model
+        self.writer_model = writer_model
+        self.voice_space = voice_space
 
 
 # ---------------------------------------------------------------------------
@@ -73,14 +73,6 @@ def _coerce_int(value, default: int) -> int:
         return default
 
 
-def _split_model(model_str: str) -> tuple[str | None, str]:
-    """Split 'provider/model' → (provider, model). Returns (None, model) if no '/'."""
-    if "/" in model_str:
-        provider, _, model = model_str.partition("/")
-        return provider or None, model
-    return None, model_str
-
-
 def load_config(ctx: InstanceContext) -> ThrivemindConfig:
     raw = ctx.config("thrivemind") or {}
     if not isinstance(raw, dict):
@@ -97,94 +89,52 @@ def load_config(ctx: InstanceContext) -> ThrivemindConfig:
     )
 
 
-def _individual_from_dict(d: dict) -> Individual:
-    return Individual(
-        id=str(d["id"]),
+def _identity_from_dict(d: dict) -> Identity:
+    return Identity(
+        name=str(d.get("name") or d.get("id", "")),
         dims={k: float(v) for k, v in d.get("dims", {}).items()},
         approval=int(d.get("approval", 0)),
         created_at=int(d.get("created_at", 0)),
     )
 
 
-def _individual_to_dict(ind: Individual) -> dict:
+def _identity_to_dict(ind: Identity) -> dict:
     return {
-        "id": ind.id,
-        "dims": ind.dims,
+        "name": ind.name,
+        "dims": ind.dims or {},
         "approval": ind.approval,
         "created_at": ind.created_at,
     }
 
 
-def load_colony(ctx: InstanceContext) -> list[Individual]:
+def load_colony(ctx: InstanceContext) -> list[Identity]:
     store = ctx.store(COLONY_NAMESPACE)
     result = []
     for _key, value in store.scan():
-        if isinstance(value, dict) and "id" in value:
-            result.append(_individual_from_dict(value))
+        if isinstance(value, dict) and ("name" in value or "id" in value):
+            result.append(_identity_from_dict(value))
     result.sort(key=lambda i: i.created_at)
     return result
 
 
-def save_colony(ctx: InstanceContext, colony: list[Individual]) -> None:
+def save_colony(ctx: InstanceContext, colony: list[Identity]) -> None:
     store = ctx.store(COLONY_NAMESPACE)
-    # Delete all existing entries
     for key, _ in store.scan():
         store.delete(key)
     for ind in colony:
-        store.put(ind.id, _individual_to_dict(ind))
+        store.put(ind.name, _identity_to_dict(ind))
 
 
-def spawn_initial_colony(cfg: ThrivemindConfig, rng: random.Random | None = None) -> list[Individual]:
+def spawn_initial_colony(
+    cfg: ThrivemindConfig, rng: random.Random | None = None
+) -> list[Identity]:
     rng = rng or random.Random()
     colony = []
     now = int(time.time())
     for _ in range(cfg.colony_size):
         dims = {name: round(rng.uniform(-1.0, 1.0), 4) for name in AXIS_NAMES}
-        colony.append(Individual(id=str(uuid.uuid4()), dims=dims, approval=0, created_at=now))
+        colony.append(Identity(name=str(uuid.uuid4()), dims=dims, approval=0, created_at=now))
     return colony
-
-
-# ---------------------------------------------------------------------------
-# Persona formatting
-# ---------------------------------------------------------------------------
-
-
-def format_persona(individual: Individual) -> str:
-    """Map individual dimensions to a descriptive persona string."""
-
-    def magnitude_label(v: float) -> str:
-        a = abs(v)
-        if a >= 0.8:
-            return "extremely"
-        if a >= 0.6:
-            return "very"
-        if a >= 0.4:
-            return "fairly"
-        if a >= 0.2:
-            return "somewhat"
-        return ""
-
-    # Build (magnitude, label, trait_name) for non-zero axes
-    entries = []
-    for (pos_pole, neg_pole), name in zip(AXES, AXIS_NAMES):
-        v = individual.dims.get(name, 0.0)
-        pole = pos_pole if v >= 0 else neg_pole
-        label = magnitude_label(v)
-        entries.append((abs(v), label, pole))
-
-    # Sort descending by magnitude
-    entries.sort(key=lambda x: -x[0])
-
-    # Filter out entries below 0.2 threshold
-    significant = [(mag, label, pole) for mag, label, pole in entries if mag >= 0.2]
-
-    if not significant:
-        # Fallback: include highest-magnitude as "barely <axis>"
-        mag, _label, pole = entries[0]
-        return f"barely {pole}"
-
-    parts = [f"{label} {pole}" for _mag, label, pole in significant]
-    return ", ".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -193,200 +143,14 @@ def format_persona(individual: Individual) -> str:
 
 
 def select_suggesters(
-    colony: list[Individual],
+    colony: list[Identity],
     n: int,
     rng: random.Random | None = None,
-) -> list[Individual]:
+) -> list[Identity]:
     """Select n individuals weighted by approval (approval+1, min 0)."""
     rng = rng or random.Random()
-    if not colony:
-        return []
-    n = min(n, len(colony))
-
-    weights = [max(0, ind.approval + 1) for ind in colony]
-    total = sum(weights)
-
-    if total == 0:
-        # Fall back to uniform random
-        return rng.sample(colony, n)
-
-    # Weighted sample without replacement
-    selected = []
-    remaining = list(zip(weights, colony))
-    for _ in range(n):
-        if not remaining:
-            break
-        r_weights = [w for w, _ in remaining]
-        r_total = sum(r_weights)
-        pick = rng.uniform(0, r_total)
-        cumulative = 0.0
-        chosen_idx = 0
-        for idx, (w, _) in enumerate(remaining):
-            cumulative += w
-            if pick <= cumulative:
-                chosen_idx = idx
-                break
-        _, chosen = remaining.pop(chosen_idx)
-        selected.append(chosen)
-
-    return selected
-
-
-# ---------------------------------------------------------------------------
-# LLM helpers
-# ---------------------------------------------------------------------------
-
-
-def _llm_with_model(ctx: InstanceContext, model_str: str, messages: list[dict], **kwargs):
-    """Call ctx.llm, optionally routing to a specific provider/model."""
-    if model_str:
-        provider, model = _split_model(model_str)
-        kwargs["model"] = model
-        if provider:
-            kwargs["provider"] = provider
-    return ctx.llm(messages, **kwargs)
-
-
-def generate_suggestion(
-    ctx: InstanceContext,
-    individual: Individual,
-    prompt: str,
-    cfg: ThrivemindConfig,
-) -> str:
-    persona = format_persona(individual)
-    system = (
-        "You are one voice in a colony deliberating on how to respond. "
-        "Speak from your personality. Be concise and direct."
-    )
-    user_msg = f"Personality: {persona}\n\nConversation:\n{prompt}\n\nWrite a candidate reply."
-    response = _llm_with_model(
-        ctx,
-        cfg.suggestion_model,
-        [{"role": "user", "content": user_msg}],
-        system=system,
-        max_tokens=512,
-        caller="thrivemind_suggestion",
-    )
-    return response.message.strip()
-
-
-def generate_vote(
-    ctx: InstanceContext,
-    individual: Individual,
-    candidates: dict[str, str],
-    prompt: str,
-    cfg: ThrivemindConfig,
-) -> list[str]:
-    """Return ranked list of candidate individual IDs (best first)."""
-    if not candidates:
-        return []
-    if len(candidates) == 1:
-        return list(candidates.keys())
-
-    persona = format_persona(individual)
-    options = "\n".join(f"- {cid}: {text}" for cid, text in candidates.items())
-    system = "You are voting on candidate replies. Rank them by how well they address the conversation."
-    user_msg = (
-        f"Personality: {persona}\n\nConversation:\n{prompt}\n\n"
-        f"Candidates:\n{options}\n\n"
-        f"Return JSON: {{\"ranking\": [\"id1\", \"id2\", ...]}}"
-    )
-    response = _llm_with_model(
-        ctx,
-        cfg.suggestion_model,
-        [{"role": "user", "content": user_msg}],
-        system=system,
-        max_tokens=256,
-        caller="thrivemind_vote",
-    )
-    # Parse JSON ranking
-    candidate_ids = list(candidates.keys())
-    try:
-        raw = response.message.strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
-        data = json.loads(raw)
-        ranking = [str(r) for r in data.get("ranking", [])]
-    except Exception:
-        ranking = []
-
-    # Normalize: ensure all ids present
-    normalized = [cid for cid in ranking if cid in candidate_ids]
-    for cid in candidate_ids:
-        if cid not in normalized:
-            normalized.append(cid)
-    return normalized
-
-
-# ---------------------------------------------------------------------------
-# Borda tally
-# ---------------------------------------------------------------------------
-
-
-def tally_borda(
-    candidates: dict[str, str],
-    votes: dict[str, list[str]],
-) -> dict:
-    """Borda count over candidate id→text, votes as voter_id→ranked id list."""
-    scores: dict[str, int] = {cid: 0 for cid in candidates}
-    n = len(candidates)
-
-    if votes:
-        for ranking in votes.values():
-            for idx, cid in enumerate(ranking):
-                if cid in scores:
-                    scores[cid] += n - idx
-    else:
-        for cid in scores:
-            scores[cid] = 1
-
-    winner_id = sorted(scores.items(), key=lambda x: (-x[1], x[0]))[0][0]
-
-    return {
-        "winner_member": winner_id,
-        "winner_message": candidates[winner_id],
-        "scores": scores,
-        "candidate_count": len(candidates),
-        "vote_count": len(votes),
-    }
-
-
-# ---------------------------------------------------------------------------
-# Output composition
-# ---------------------------------------------------------------------------
-
-
-def write_message(
-    ctx: InstanceContext,
-    prompt: str,
-    winner_text: str,
-    all_candidates: dict[str, str],
-    constitution: str,
-    cfg: ThrivemindConfig,
-) -> str:
-    snippets = "\n".join(f"- {text}" for text in all_candidates.values())
-    system = (
-        "You are the unified voice of a colony. "
-        "Write one coherent, considered reply that reflects the colony's deliberation.\n\n"
-        f"Colony constitution:\n{constitution}"
-        if constitution.strip()
-        else "You are the unified voice of a colony. Write one coherent, considered reply."
-    )
-    user_msg = (
-        f"Conversation:\n{prompt}\n\n"
-        f"Winning candidate:\n{winner_text}\n\n"
-        f"All candidates:\n{snippets}\n\n"
-        "Write the final reply."
-    )
-    response = _llm_with_model(
-        ctx,
-        cfg.writer_model,
-        [{"role": "user", "content": user_msg}],
-        system=system,
-        max_tokens=1024,
-        caller="thrivemind_write",
-    )
-    return response.message.strip()
+    weights = approval_weights(colony)
+    return weighted_sample(colony, weights, n, rng)
 
 
 # ---------------------------------------------------------------------------
@@ -396,26 +160,23 @@ def write_message(
 
 def contribute_constitution_line(
     ctx: InstanceContext,
-    individual: Individual,
+    individual: Identity,
     current_constitution: str,
     cfg: ThrivemindConfig,
 ) -> str:
     persona = format_persona(individual)
-    system = "You are contributing one principle or value to your colony's shared constitution."
-    user_msg = (
+    prompt = (
         f"Personality: {persona}\n\n"
         f"Current constitution:\n{current_constitution}\n\n"
         "Propose one new principle or refinement (one sentence)."
     )
-    response = _llm_with_model(
+    return generate_with_identity(
         ctx,
-        cfg.suggestion_model,
-        [{"role": "user", "content": user_msg}],
-        system=system,
-        max_tokens=128,
-        caller="thrivemind_constitution_line",
+        individual,
+        prompt,
+        context="You are contributing one principle or value to your colony's shared constitution.",
+        model=cfg.suggestion_model,
     )
-    return response.message.strip()
 
 
 def rewrite_constitution(
@@ -425,48 +186,44 @@ def rewrite_constitution(
     cfg: ThrivemindConfig,
 ) -> str:
     combined = "\n".join(f"- {line}" for line in lines if line.strip())
-    system = "You are synthesizing colony principles into a coherent constitution."
-    user_msg = (
+    # Use a writer identity with the writer model
+    provider, model = parse_model(cfg.writer_model) if cfg.writer_model else (None, "")
+    writer = Identity(
+        name="ColonyWriter",
+        model=model,
+        provider=provider,
+        personality="You are synthesizing colony principles into a coherent constitution.",
+    )
+    prompt = (
         f"Current constitution:\n{current_constitution}\n\n"
         f"Proposed principles:\n{combined}\n\n"
         "Rewrite the constitution incorporating the best principles. Keep it concise."
     )
-    response = _llm_with_model(
-        ctx,
-        cfg.writer_model,
-        [{"role": "user", "content": user_msg}],
-        system=system,
-        max_tokens=512,
-        caller="thrivemind_constitution_rewrite",
-    )
-    return response.message.strip()
+    return generate_with_identity(ctx, writer, prompt, model=cfg.writer_model)
 
 
 def vote_constitution(
     ctx: InstanceContext,
-    individual: Individual,
+    individual: Identity,
     current: str,
     proposed: str,
     cfg: ThrivemindConfig,
 ) -> bool:
     persona = format_persona(individual)
-    system = "You are voting on whether to adopt a new constitution for your colony."
-    user_msg = (
+    prompt = (
         f"Personality: {persona}\n\n"
         f"Current:\n{current}\n\n"
         f"Proposed:\n{proposed}\n\n"
-        "Reply with JSON: {\"accept\": true} or {\"accept\": false}"
+        'Reply with JSON: {"accept": true} or {"accept": false}'
     )
-    response = _llm_with_model(
+    raw = generate_with_identity(
         ctx,
-        cfg.suggestion_model,
-        [{"role": "user", "content": user_msg}],
-        system=system,
-        max_tokens=64,
-        caller="thrivemind_constitution_vote",
+        individual,
+        prompt,
+        context="You are voting on whether to adopt a new constitution for your colony.",
+        model=cfg.suggestion_model,
     )
     try:
-        raw = response.message.strip()
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
         data = json.loads(raw)
@@ -489,10 +246,10 @@ def load_constitution(ctx: InstanceContext) -> str:
 
 
 def run_spawn_cycle(
-    colony: list[Individual],
+    colony: list[Identity],
     cfg: ThrivemindConfig,
     rng: random.Random | None = None,
-) -> list[Individual]:
+) -> list[Identity]:
     """Eligible individuals spawn offspring and are replaced."""
     rng = rng or random.Random()
     if not colony:
@@ -506,39 +263,32 @@ def run_spawn_cycle(
     if total_approval == 0:
         return colony
 
-    to_remove_ids: set[str] = set()
-    new_individuals: list[Individual] = []
+    to_remove_names: set[str] = set()
+    new_individuals: list[Identity] = []
     now = int(time.time())
 
     for primary in eligible:
-        # Select other parent weighted by approval
         weights = [ind.approval / total_approval for ind in eligible]
         (other,) = rng.choices(eligible, weights=weights, k=1)
 
-        # Build offspring dims
         offspring_dims: dict[str, float] = {}
         for name in AXIS_NAMES:
             roll = rng.random()
             if roll < 0.15:
-                # 15% randomized entirely
                 offspring_dims[name] = round(rng.uniform(-1.0, 1.0), 4)
             elif roll < 0.40:
-                # 25% from other parent
-                offspring_dims[name] = other.dims.get(name, 0.0)
+                offspring_dims[name] = other.dims.get(name, 0.0) if other.dims else 0.0
             else:
-                # Rest from primary
-                offspring_dims[name] = primary.dims.get(name, 0.0)
+                offspring_dims[name] = primary.dims.get(name, 0.0) if primary.dims else 0.0
 
         new_individuals.append(
-            Individual(id=str(uuid.uuid4()), dims=offspring_dims, approval=0, created_at=now)
+            Identity(name=str(uuid.uuid4()), dims=offspring_dims, approval=0, created_at=now)
         )
-        to_remove_ids.add(primary.id)
+        to_remove_names.add(primary.name)
 
-    # Ensure colony stays at target size
-    remaining = [ind for ind in colony if ind.id not in to_remove_ids]
+    remaining = [ind for ind in colony if ind.name not in to_remove_names]
     projected = len(remaining) + len(new_individuals)
     while projected < cfg.colony_size:
-        # Spawn extra offspring from random eligible pair
         primary = rng.choice(eligible)
         other = rng.choice(eligible)
         dims: dict[str, float] = {}
@@ -547,14 +297,13 @@ def run_spawn_cycle(
             if roll < 0.15:
                 dims[name] = round(rng.uniform(-1.0, 1.0), 4)
             elif roll < 0.40:
-                dims[name] = other.dims.get(name, 0.0)
+                dims[name] = other.dims.get(name, 0.0) if other.dims else 0.0
             else:
-                dims[name] = primary.dims.get(name, 0.0)
-        new_individuals.append(Individual(id=str(uuid.uuid4()), dims=dims, approval=0, created_at=now))
+                dims[name] = primary.dims.get(name, 0.0) if primary.dims else 0.0
+        new_individuals.append(Identity(name=str(uuid.uuid4()), dims=dims, approval=0, created_at=now))
         projected += 1
 
     new_colony = remaining + new_individuals
-    # If over colony_size, remove lowest-approval members
     if len(new_colony) > cfg.colony_size:
         new_colony.sort(key=lambda i: i.approval)
         new_colony = new_colony[len(new_colony) - cfg.colony_size :]
@@ -568,25 +317,23 @@ def run_spawn_cycle(
 
 
 def update_approvals(
-    colony: list[Individual],
+    colony: list[Identity],
     votes: dict[str, list[str]],
     winner_id: str,
     cfg: ThrivemindConfig,  # noqa: ARG001 kept for API consistency
-) -> list[Individual]:
+) -> list[Identity]:
     """Update approval scores based on vote results."""
-    id_map = {ind.id: ind for ind in colony}
+    id_map = {ind.name: ind for ind in colony}
 
-    for voter_id, ranking in votes.items():
+    for voter_name, ranking in votes.items():
         if not ranking:
             continue
         top_pick = ranking[0]
         if top_pick == winner_id:
-            # Winner gets +1 per voter who ranked them first
             if winner_id in id_map:
                 id_map[winner_id].approval += 1
         else:
-            # Non-winner voter whose top vote ≠ winner gets -1
-            if voter_id in id_map:
-                id_map[voter_id].approval -= 1
+            if voter_name in id_map:
+                id_map[voter_name].approval -= 1
 
     return list(id_map.values())

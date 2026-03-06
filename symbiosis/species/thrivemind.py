@@ -16,16 +16,14 @@ from symbiosis.toolkit.hivemind import (
     load_constitution,
     save_constitution,
     select_suggesters,
-    generate_suggestion,
-    generate_vote,
-    tally_borda,
-    write_message,
     contribute_constitution_line,
     rewrite_constitution,
     vote_constitution,
     run_spawn_cycle,
     update_approvals,
 )
+from symbiosis.toolkit.identity import Identity, parse_model
+from symbiosis.toolkit.deliberate import deliberate, recompose
 from symbiosis.toolkit.prompts import format_events
 
 if TYPE_CHECKING:
@@ -54,41 +52,41 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
     constitution = load_constitution(ctx)
     prompt = format_events(events)
 
-    # Select suggesters (approval-weighted)
     n_suggesters = max(1, math.ceil(cfg.colony_size * cfg.suggestion_fraction))
     suggesters = select_suggesters(colony, n_suggesters)
 
-    # Generate candidate suggestions
-    candidates: dict[str, str] = {}
-    for individual in suggesters:
-        text = generate_suggestion(ctx, individual, prompt, cfg)
-        if text:
-            candidates[individual.id] = text
+    result = deliberate(
+        ctx,
+        colony,
+        prompt,
+        context=constitution,
+        subset=suggesters,
+        model=cfg.suggestion_model,
+        consensus_threshold=cfg.consensus_threshold,
+    )
 
-    if not candidates:
+    if not result["candidates"]:
         return
 
-    # All colony members vote
-    votes: dict[str, list[str]] = {}
-    for individual in colony:
-        ranking = generate_vote(ctx, individual, candidates, prompt, cfg)
-        votes[individual.id] = ranking
-
-    tally = tally_borda(candidates, votes)
-    winner_id = tally["winner_member"]
-    winner_text = tally["winner_message"]
-
-    # Check consensus
-    total_score = sum(tally["scores"].values())
-    winner_score = tally["scores"].get(winner_id, 0)
-    has_consensus = total_score == 0 or (winner_score / total_score) > cfg.consensus_threshold
-
-    if has_consensus or len(candidates) == 1:
-        final = write_message(ctx, prompt, winner_text, candidates, constitution, cfg)
+    if result["has_consensus"] or result["candidate_count"] == 1:
+        provider, model = parse_model(cfg.writer_model) if cfg.writer_model else (None, "")
+        writer = Identity(
+            name="Colony",
+            model=model,
+            provider=provider,
+            personality="unified colony voice",
+        )
+        final = recompose(
+            ctx,
+            writer,
+            result["winner_message"],
+            result["candidates"],
+            constitution,
+            cfg.writer_model,
+        )
         ctx.send(cfg.voice_space, final)
 
-    # Update approvals and persist
-    colony = update_approvals(colony, votes, winner_id, cfg)
+    colony = update_approvals(colony, result["votes"], result["winner_member"], cfg)
     save_colony(ctx, colony)
 
 
@@ -102,17 +100,14 @@ def heartbeat(ctx: InstanceContext) -> None:
 
     constitution = load_constitution(ctx)
 
-    # Each individual contributes a constitution line
     lines = []
     for individual in colony:
         line = contribute_constitution_line(ctx, individual, constitution, cfg)
         if line:
             lines.append(line)
 
-    # Synthesize proposed constitution
     proposed = rewrite_constitution(ctx, lines, constitution, cfg)
 
-    # Each individual votes on the proposed constitution
     votes_accept = sum(
         1 for individual in colony if vote_constitution(ctx, individual, constitution, proposed, cfg)
     )
@@ -120,7 +115,6 @@ def heartbeat(ctx: InstanceContext) -> None:
     if total > 0 and (votes_accept / total) > cfg.consensus_threshold:
         save_constitution(ctx, proposed)
 
-    # Run spawn cycle
     colony = run_spawn_cycle(colony, cfg)
     save_colony(ctx, colony)
 

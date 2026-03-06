@@ -6,13 +6,11 @@ import random
 import time
 
 from symbiosis.harness.store import open_store, NamespacedStore
+from symbiosis.toolkit.identity import AXIS_NAMES, Identity, format_persona
+from symbiosis.toolkit.voting import borda_tally
 from symbiosis.toolkit.hivemind import (
-    AXIS_NAMES,
-    Individual,
     ThrivemindConfig,
-    format_persona,
     select_suggesters,
-    tally_borda,
     run_spawn_cycle,
     update_approvals,
     load_colony,
@@ -53,56 +51,48 @@ class DummyCtx:
 
 
 # ---------------------------------------------------------------------------
-# format_persona
+# format_persona (via Identity with dims)
 # ---------------------------------------------------------------------------
 
 
-def _ind(dims: dict[str, float]) -> Individual:
-    return Individual(id="test", dims=dims, approval=0, created_at=0)
+def _ind(dims: dict[str, float]) -> Identity:
+    return Identity(name="test", dims=dims)
 
 
 class TestFormatPersona:
     def test_extreme_trait(self):
         dims = {name: 0.0 for name in AXIS_NAMES}
-        dims["conservative_liberal"] = 0.9  # extremely liberal (positive pole: conservative)
-        ind = _ind(dims)
-        result = format_persona(ind)
+        dims["conservative_liberal"] = 0.9
+        result = format_persona(_ind(dims))
         assert "extremely" in result
         assert "conservative" in result
 
     def test_negative_pole(self):
         dims = {name: 0.0 for name in AXIS_NAMES}
         dims["optimistic_pessimistic"] = -0.7
-        ind = _ind(dims)
-        result = format_persona(ind)
+        result = format_persona(_ind(dims))
         assert "very" in result
         assert "pessimistic" in result
 
     def test_midrange_label(self):
         dims = {name: 0.0 for name in AXIS_NAMES}
         dims["cautious_bold"] = 0.5
-        ind = _ind(dims)
-        result = format_persona(ind)
+        result = format_persona(_ind(dims))
         assert "fairly" in result
         assert "cautious" in result
 
     def test_all_near_zero_fallback(self):
         dims = {name: 0.0 for name in AXIS_NAMES}
-        # Set one tiny non-zero value
         dims["analytical_emotional"] = 0.1
-        ind = _ind(dims)
-        result = format_persona(ind)
-        # Should fall back to "barely <axis>"
+        result = format_persona(_ind(dims))
         assert "barely" in result
         assert "analytical" in result
 
     def test_traits_ordered_by_magnitude(self):
         dims = {name: 0.0 for name in AXIS_NAMES}
-        dims["conservative_liberal"] = 0.3   # somewhat
-        dims["analytical_emotional"] = 0.85  # extremely
-        ind = _ind(dims)
-        result = format_persona(ind)
-        # analytical should appear before conservative
+        dims["conservative_liberal"] = 0.3
+        dims["analytical_emotional"] = 0.85
+        result = format_persona(_ind(dims))
         assert result.index("analytical") < result.index("conservative")
 
 
@@ -112,27 +102,23 @@ class TestFormatPersona:
 
 
 class TestSelectSuggesters:
-    def _colony(self, approvals: list[int]) -> list[Individual]:
+    def _colony(self, approvals: list[int]) -> list[Identity]:
         return [
-            Individual(id=str(i), dims={n: 0.0 for n in AXIS_NAMES}, approval=a, created_at=0)
+            Identity(name=str(i), dims={n: 0.0 for n in AXIS_NAMES}, approval=a)
             for i, a in enumerate(approvals)
         ]
 
     def test_approval_weighting_favors_higher(self):
         colony = self._colony([0, 5, 5, 5])
         rng = random.Random(42)
-        counts = {ind.id: 0 for ind in colony}
+        counts = {ind.name: 0 for ind in colony}
         for _ in range(200):
             selected = select_suggesters(colony, 1, rng=rng)
-            counts[selected[0].id] += 1
-        # Individual 0 has approval=0, weight=1; others have weight=6
-        # So id "0" should be selected less often
+            counts[selected[0].name] += 1
         assert counts["0"] < counts["1"]
 
     def test_negative_approval_excluded(self):
         colony = self._colony([-5, -5, -5])
-        # All weights are 0 after max(0, approval+1) = 0 for approval=-5
-        # Falls back to uniform — should still return n items
         rng = random.Random(1)
         result = select_suggesters(colony, 2, rng=rng)
         assert len(result) == 2
@@ -147,12 +133,12 @@ class TestSelectSuggesters:
         rng = random.Random(7)
         for _ in range(50):
             result = select_suggesters(colony, 3, rng=rng)
-            ids = [ind.id for ind in result]
-            assert len(ids) == len(set(ids))
+            names = [ind.name for ind in result]
+            assert len(names) == len(set(names))
 
 
 # ---------------------------------------------------------------------------
-# tally_borda
+# tally_borda (from voting module)
 # ---------------------------------------------------------------------------
 
 
@@ -164,7 +150,7 @@ class TestTallyBorda:
             "v2": ["b", "c", "a"],
             "v3": ["a", "b", "c"],
         }
-        tally = tally_borda(candidates, votes)
+        tally = borda_tally(candidates, votes)
         assert tally["winner_member"] == "b"
         assert tally["candidate_count"] == 3
         assert tally["vote_count"] == 3
@@ -172,7 +158,7 @@ class TestTallyBorda:
     def test_returns_correct_fields(self):
         candidates = {"x": "text x", "y": "text y"}
         votes = {"v1": ["x", "y"]}
-        tally = tally_borda(candidates, votes)
+        tally = borda_tally(candidates, votes)
         assert "winner_member" in tally
         assert "winner_message" in tally
         assert "scores" in tally
@@ -180,13 +166,13 @@ class TestTallyBorda:
 
     def test_no_votes_all_score_one(self):
         candidates = {"a": "aa", "b": "bb"}
-        tally = tally_borda(candidates, {})
+        tally = borda_tally(candidates, {})
         assert tally["scores"]["a"] == 1
         assert tally["scores"]["b"] == 1
 
     def test_single_candidate_wins(self):
         candidates = {"only": "text"}
-        tally = tally_borda(candidates, {})
+        tally = borda_tally(candidates, {})
         assert tally["winner_member"] == "only"
 
 
@@ -195,11 +181,11 @@ class TestTallyBorda:
 # ---------------------------------------------------------------------------
 
 
-def _make_colony(approvals: list[int], cfg: ThrivemindConfig) -> list[Individual]:
+def _make_colony(approvals: list[int], cfg: ThrivemindConfig) -> list[Identity]:
     now = int(time.time())
     return [
-        Individual(
-            id=str(i),
+        Identity(
+            name=str(i),
             dims={n: 0.1 for n in AXIS_NAMES},
             approval=a,
             created_at=now,
@@ -221,17 +207,16 @@ class TestRunSpawnCycle:
         colony = _make_colony([0, 1, 2, 3], cfg)
         new_colony = run_spawn_cycle(colony, cfg)
         assert len(new_colony) == len(colony)
-        assert {ind.id for ind in new_colony} == {ind.id for ind in colony}
+        assert {ind.name for ind in new_colony} == {ind.name for ind in colony}
 
     def test_offspring_have_zero_approval(self):
         cfg = ThrivemindConfig(colony_size=4, approval_threshold=2)
         colony = _make_colony([0, 0, 3, 4], cfg)
         rng = random.Random(99)
         new_colony = run_spawn_cycle(colony, cfg, rng=rng)
-        # All new individuals (id not in original) should have approval=0
-        original_ids = {ind.id for ind in colony}
+        original_names = {ind.name for ind in colony}
         for ind in new_colony:
-            if ind.id not in original_ids:
+            if ind.name not in original_names:
                 assert ind.approval == 0
 
     def test_eligible_individuals_removed(self):
@@ -239,15 +224,14 @@ class TestRunSpawnCycle:
         colony = _make_colony([0, 0, 4, 5], cfg)
         rng = random.Random(1)
         new_colony = run_spawn_cycle(colony, cfg, rng=rng)
-        new_ids = {ind.id for ind in new_colony}
-        # The two eligible individuals (ids "2" and "3") should be replaced
-        assert "2" not in new_ids
-        assert "3" not in new_ids
+        new_names = {ind.name for ind in new_colony}
+        assert "2" not in new_names
+        assert "3" not in new_names
 
     def test_dim_inheritance(self):
         cfg = ThrivemindConfig(colony_size=2, approval_threshold=1)
-        primary = Individual(
-            id="parent",
+        primary = Identity(
+            name="parent",
             dims={n: 0.5 for n in AXIS_NAMES},
             approval=3,
             created_at=0,
@@ -267,9 +251,9 @@ class TestRunSpawnCycle:
 
 
 class TestUpdateApprovals:
-    def _colony(self, ids_approvals: list[tuple[str, int]]) -> list[Individual]:
+    def _colony(self, ids_approvals: list[tuple[str, int]]) -> list[Identity]:
         return [
-            Individual(id=i, dims={n: 0.0 for n in AXIS_NAMES}, approval=a, created_at=0)
+            Identity(name=i, dims={n: 0.0 for n in AXIS_NAMES}, approval=a)
             for i, a in ids_approvals
         ]
 
@@ -281,22 +265,20 @@ class TestUpdateApprovals:
         }
         cfg = ThrivemindConfig()
         updated = update_approvals(colony, votes, "b", cfg)
-        id_map = {ind.id: ind for ind in updated}
-        # "b" won; 2 voters ranked "b" first → +2
+        id_map = {ind.name: ind for ind in updated}
         assert id_map["b"].approval == 2
 
     def test_non_winner_voter_loses_one(self):
         colony = self._colony([("a", 0), ("b", 0)])
-        # voter "a" ranked "a" first, but "b" won
         votes = {
             "a": ["a", "b"],
             "b": ["b", "a"],
         }
         cfg = ThrivemindConfig()
         updated = update_approvals(colony, votes, "b", cfg)
-        id_map = {ind.id: ind for ind in updated}
+        id_map = {ind.name: ind for ind in updated}
         assert id_map["a"].approval == -1
-        assert id_map["b"].approval == 1  # voter "b" ranked "b" first → +1
+        assert id_map["b"].approval == 1
 
     def test_no_votes_no_change(self):
         colony = self._colony([("x", 5)])

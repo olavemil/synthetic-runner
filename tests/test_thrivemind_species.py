@@ -46,16 +46,20 @@ class DummyCtx:
         if self._llm_fn:
             return self._llm_fn(messages, **kwargs)
         caller = kwargs.get("caller", "")
-        if "constitution" in caller:
-            if "vote" in caller:
-                return SimpleNamespace(message='{"accept": true}')
-            if "rewrite" in caller:
-                return SimpleNamespace(message="Rewritten constitution.")
-            return SimpleNamespace(message="New principle.")
+        user_content = messages[-1]["content"] if messages else ""
+        # Voting (ranking) calls
         if "vote" in caller:
             return SimpleNamespace(message='{"ranking": []}')
-        if "write" in caller:
+        # Constitution acceptance vote (message contains "accept")
+        if '"accept"' in user_content:
+            return SimpleNamespace(message='{"accept": true}')
+        # Rewrite constitution — ColonyWriter identity
+        if "ColonyWriter" in caller:
+            return SimpleNamespace(message="Rewritten constitution.")
+        # Final colony write — Colony identity
+        if "Colony" in caller:
             return SimpleNamespace(message="Final colony message.")
+        # Everything else (suggestions, constitution lines)
         return SimpleNamespace(message="Candidate text.")
 
 
@@ -75,26 +79,20 @@ class TestThrivemindOnMessage:
             "voice_space": "main",
         }
 
-        call_state = {"vote_ids": []}
-
         def llm_fn(messages, **kwargs):
             caller = kwargs.get("caller", "")
-            if "suggestion" in caller:
-                return SimpleNamespace(message="A candidate reply.")
+            # vote calls return a ranking (JSON)
             if "vote" in caller:
-                ids = call_state["vote_ids"]
-                if ids:
-                    ranking = list(ids)
-                    return SimpleNamespace(message=f'{{"ranking": {ranking}}}')
                 return SimpleNamespace(message='{"ranking": []}')
-            if "write" in caller:
+            # Colony writer (recompose) returns final message
+            if "Colony" in caller:
                 return SimpleNamespace(message="Final message.")
-            return SimpleNamespace(message="")
+            # All other generate calls (suggestions)
+            return SimpleNamespace(message="A candidate reply.")
 
         ctx = DummyCtx("inst1", db, cfg, llm_response_fn=llm_fn)
         events = [_make_event()]
 
-        # Capture suggester IDs after colony is created
         on_message(ctx, events)
 
         assert len(ctx.sent) == 1
@@ -112,22 +110,16 @@ class TestThrivemindOnMessage:
             "voice_space": "main",
         }
 
-        # Track candidate IDs so we can spread votes evenly
         captured_candidates: list[str] = []
 
         def llm_fn(messages, **kwargs):
             caller = kwargs.get("caller", "")
-            if "suggestion" in caller:
-                return SimpleNamespace(message="Candidate.")
             if "vote" in caller:
-                # Each voter votes for a different candidate → spread votes
                 if captured_candidates:
-                    # Rotate: different voter picks different first place
-                    top = captured_candidates[len(captured_candidates) % len(captured_candidates)]
-                    ranking = captured_candidates[:]
-                    return SimpleNamespace(message=f'{{"ranking": {ranking}}}')
+                    rotated = captured_candidates[:]
+                    return SimpleNamespace(message=f'{{"ranking": {rotated}}}')
                 return SimpleNamespace(message='{"ranking": []}')
-            return SimpleNamespace(message="")
+            return SimpleNamespace(message="Candidate.")
 
         ctx = DummyCtx("inst1", db, cfg, llm_response_fn=llm_fn)
         events = [_make_event("discuss")]
@@ -137,29 +129,24 @@ class TestThrivemindOnMessage:
         colony_cfg = ThrivemindConfig(colony_size=4)
         colony = spawn_initial_colony(colony_cfg)
         save_colony(ctx, colony)
-        captured_candidates.extend(ind.id for ind in colony[:2])  # 2 suggesters
+        captured_candidates.extend(ind.name for ind in colony[:2])  # 2 suggesters
 
-        # Provide votes that distribute evenly (no clear winner above threshold)
         vote_call = [0]
 
         def llm_fn2(messages, **kwargs):
             caller = kwargs.get("caller", "")
-            if "suggestion" in caller:
-                return SimpleNamespace(message="Candidate.")
             if "vote" in caller:
-                # Load colony IDs from context — approximate by cycling
                 n = vote_call[0] % max(len(captured_candidates), 1)
                 vote_call[0] += 1
                 if captured_candidates:
                     rotated = captured_candidates[n:] + captured_candidates[:n]
                     return SimpleNamespace(message=f'{{"ranking": {rotated}}}')
                 return SimpleNamespace(message='{"ranking": []}')
-            return SimpleNamespace(message="")
+            return SimpleNamespace(message="Candidate.")
 
         ctx._llm_fn = llm_fn2
         on_message(ctx, events)
         # With threshold=0.99, consensus is hard to reach with 2 equal candidates
-        # sent may be 0 or 1 depending on exact score distribution — just verify no error
 
 
 class TestThrivemindHeartbeat:
@@ -179,7 +166,7 @@ class TestThrivemindHeartbeat:
 
         heartbeat(ctx)
 
-        # Constitution should have been rewritten
+        # Constitution should have been rewritten (ColonyWriter returns "Rewritten constitution.")
         assert ctx._files.get("constitution.md", "") == "Rewritten constitution."
 
     def test_heartbeat_spawn_cycle_maintains_size(self):

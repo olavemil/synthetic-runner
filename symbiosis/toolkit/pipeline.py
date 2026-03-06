@@ -15,6 +15,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _lazy_deliberate(name: str) -> Callable:
+    """Return a lazy-imported deliberate function to avoid circular imports."""
+    def _fn(*args, **kwargs):
+        import importlib
+        mod = importlib.import_module("symbiosis.toolkit.deliberate")
+        return getattr(mod, name)(*args, **kwargs)
+    _fn.__name__ = name
+    return _fn
+
+
 # Map stage names to pattern functions
 STAGE_REGISTRY: dict[str, Callable] = {
     "gut_response": patterns.gut_response,
@@ -26,6 +36,12 @@ STAGE_REGISTRY: dict[str, Callable] = {
     "distill_memory": patterns.distill_memory,
     "distill_messages": patterns.distill_messages,
     "run_session": patterns.run_session,
+    "generate_with_identity": _lazy_deliberate("generate_with_identity"),
+    "multi_generate": _lazy_deliberate("multi_generate"),
+    "multi_vote": _lazy_deliberate("multi_vote"),
+    "deliberate": _lazy_deliberate("deliberate"),
+    "recompose": _lazy_deliberate("recompose"),
+    "think_with_context": _lazy_deliberate("think_with_context"),
 }
 
 
@@ -35,6 +51,16 @@ class PipelineError(Exception):
 
 def resolve_input(ctx: InstanceContext, source: str, pipeline_state: dict) -> Any:
     """Resolve an input source reference to its value."""
+    if source == "events.all":
+        return pipeline_state.get("_events", [])
+
+    if source == "events.formatted":
+        from symbiosis.toolkit.prompts import format_events
+        return format_events(pipeline_state.get("_events", []))
+
+    if source == "item":
+        return pipeline_state.get("_foreach_item")
+
     if source.startswith("memory."):
         path = source[len("memory."):]
         if path == "*":
@@ -163,43 +189,35 @@ def apply_preprocessor(
     return value
 
 
-def run_stage(
+def _run_single_stage(
     ctx: InstanceContext,
     stage_def: dict,
     pipeline_state: dict,
 ) -> Any:
-    """Execute a single pipeline stage."""
+    """Execute the LLM/pattern call for a stage (no foreach handling)."""
     stage_name = stage_def["stage"]
 
     if stage_name not in STAGE_REGISTRY:
         raise PipelineError(f"Unknown stage: {stage_name}")
 
-    # Resolve inputs
     inputs = {}
     for slot, source in stage_def.get("inputs", {}).items():
         value = resolve_input(ctx, source, pipeline_state)
-
-        # Apply preprocessors
         preprocessors = stage_def.get("preprocessors", {})
         if slot in preprocessors:
             value = apply_preprocessor(ctx, value, preprocessors[slot])
-
         inputs[slot] = value
 
-    # Call the stage function
     fn = STAGE_REGISTRY[stage_name]
     try:
         result = fn(ctx, **inputs)
     except TypeError:
-        # If kwargs don't match, try positional
         result = fn(ctx)
 
-    # Write outputs
     for slot, destination in stage_def.get("outputs", {}).items():
         output_value = result if not isinstance(result, dict) else result.get(slot, result)
         write_output(ctx, destination, output_value, pipeline_state)
 
-    # Consume inputs
     for slot, should_consume in stage_def.get("consume_inputs", {}).items():
         if should_consume:
             source = stage_def.get("inputs", {}).get(slot)
@@ -209,9 +227,36 @@ def run_stage(
     return result
 
 
-def run_pipeline(ctx: InstanceContext, steps: list[dict]) -> dict:
+def run_stage(
+    ctx: InstanceContext,
+    stage_def: dict,
+    pipeline_state: dict,
+) -> Any:
+    """Execute a single pipeline stage, with optional foreach/collect iteration."""
+    foreach_source = stage_def.get("foreach")
+    collect_to = stage_def.get("collect")
+    collect_key = stage_def.get("collect_key")
+
+    if foreach_source:
+        items = resolve_input(ctx, foreach_source, pipeline_state)
+        container: Any = {} if collect_key else []
+        for item in (items if isinstance(items, list) else [items]):
+            local_state = {**pipeline_state, "_foreach_item": item}
+            r = _run_single_stage(ctx, stage_def, local_state)
+            if collect_key:
+                container[getattr(item, collect_key, str(item))] = r
+            else:
+                container.append(r)
+        if collect_to:
+            pipeline_state[collect_to] = container
+        return container
+
+    return _run_single_stage(ctx, stage_def, pipeline_state)
+
+
+def run_pipeline(ctx: InstanceContext, steps: list[dict], events: list | None = None) -> dict:
     """Execute a pipeline — a linear sequence of stages."""
-    pipeline_state: dict = {}
+    pipeline_state: dict = {"_events": events or []}
 
     for step in steps:
         logger.info("Running stage: %s", step.get("stage"))

@@ -12,12 +12,10 @@ from symbiosis.toolkit.hecate import (
     load_config,
     load_shared_memory,
     load_voice_memory,
-    think,
-    suggest_response,
-    vote_response,
-    reword_response,
     update_voice_subconscious,
+    _build_memory_context,
 )
+from symbiosis.toolkit.deliberate import deliberate, recompose, think_with_context
 from symbiosis.toolkit.prompts import format_events
 
 if TYPE_CHECKING:
@@ -55,52 +53,41 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
         return
 
     shared_memory = load_shared_memory(ctx)
-    voice_memories = [load_voice_memory(ctx, v) for v in cfg.voices]
+    context = _build_memory_context(shared_memory)
     prompt = format_events(events)
 
-    # Each voice suggests a response
-    suggestions = [
-        suggest_response(ctx, v, prompt, shared_memory, voice_memories[i])
-        for i, v in enumerate(cfg.voices)
-    ]
+    result = deliberate(
+        ctx,
+        cfg.voices,
+        prompt,
+        context=context,
+        exclude_own=True,
+        top_n=1,
+    )
 
-    # Each voice votes on the other voices' suggestions
-    vote_results = [
-        vote_response(ctx, v, suggestions, i)
-        for i, v in enumerate(cfg.voices)
-    ]
+    if not result["candidates"]:
+        return
 
-    # Tally votes per suggestion index
-    vote_counts = [0, 0, 0]
-    for voted_idx in vote_results:
-        if 0 <= voted_idx < 3:
-            vote_counts[voted_idx] += 1
-
-    # Determine winner: one suggestion with 2 votes, or 3-way tie (1-1-1)
-    max_votes = max(vote_counts)
-    shuffled_voices = list(enumerate(cfg.voices))
+    shuffled_voices = list(cfg.voices)
     random.shuffle(shuffled_voices)
 
-    if max_votes >= 2:
-        # Single winner
-        winner_idx = vote_counts.index(max_votes)
-        winning_text = suggestions[winner_idx]["text"]
-        # Winner's voice rewrites
-        winner_voice = cfg.voices[winner_idx]
-        winner_vm = voice_memories[winner_idx]
-        final = reword_response(ctx, winner_voice, winning_text, shared_memory, winner_vm)
-        ctx.send(cfg.voice_space, final)
-    else:
-        # 3-way tie — all three voices reword their own suggestion, joined
-        rewrites = []
-        for i, v in shuffled_voices:
-            reworded = reword_response(ctx, v, suggestions[i]["text"], shared_memory, voice_memories[i])
-            rewrites.append(reworded)
+    if result["is_tie"]:
+        rewrites = [
+            recompose(ctx, v, result["candidates"][v.name], context=context)
+            for v in shuffled_voices
+        ]
         ctx.send(cfg.voice_space, "\n\n---\n\n".join(rewrites))
+    else:
+        winner_voice = next(v for v in cfg.voices if v.name == result["winner_member"])
+        ctx.send(
+            cfg.voice_space,
+            recompose(ctx, winner_voice, result["winner_message"], context=context),
+        )
 
     # Update each voice's subconscious
-    for i, v in enumerate(cfg.voices):
-        new_sub = update_voice_subconscious(ctx, v, prompt, shared_memory, voice_memories[i])
+    for v in cfg.voices:
+        voice_memory = load_voice_memory(ctx, v)
+        new_sub = update_voice_subconscious(ctx, v, prompt, shared_memory, voice_memory)
         ctx.write(f"{v.name.lower()}_subconscious.md", new_sub)
 
 
@@ -112,11 +99,15 @@ def heartbeat(ctx: InstanceContext) -> None:
         return
 
     shared_memory = load_shared_memory(ctx)
+    context = _build_memory_context(shared_memory)
+    voice_memories = {v.name: load_voice_memory(ctx, v) for v in cfg.voices}
 
     # Iteration 0: think without others' context
     current_thoughts: dict[str, str] = {}
     for voice in cfg.voices:
-        thought = think(ctx, voice, shared_memory, others_thinking={})
+        thought = think_with_context(
+            ctx, voice, context=context, voice_memory=voice_memories[voice.name]
+        )
         current_thoughts[voice.name] = thought
 
     # Iterations 1..thinking_iterations: each voice sees others' previous thoughts
@@ -124,7 +115,13 @@ def heartbeat(ctx: InstanceContext) -> None:
         new_thoughts: dict[str, str] = {}
         for voice in cfg.voices:
             others = {name: t for name, t in current_thoughts.items() if name != voice.name}
-            thought = think(ctx, voice, shared_memory, others_thinking=others)
+            thought = think_with_context(
+                ctx,
+                voice,
+                context=context,
+                others_thinking=others,
+                voice_memory=voice_memories[voice.name],
+            )
             new_thoughts[voice.name] = thought
         current_thoughts = new_thoughts
 
@@ -135,7 +132,6 @@ def heartbeat(ctx: InstanceContext) -> None:
 
 class HecateSpecies(Species):
     def manifest(self) -> SpeciesManifest:
-        # Build default files using configured voice names if available
         voice_names = _DEFAULT_VOICE_NAMES
         default_files = {**DEFAULT_SHARED_FILES, **_default_voice_files(voice_names)}
 
@@ -159,12 +155,10 @@ class HecateSpecies(Species):
         )
 
     def _spawn(self, ctx: InstanceContext) -> None:
-        # Write shared files
         for path, content in DEFAULT_SHARED_FILES.items():
             if not ctx.exists(path):
                 ctx.write(path, content)
 
-        # Write per-voice files using configured voices if available
         cfg = load_config(ctx)
         voices_names = [v.name for v in cfg.voices] if cfg.voices else _DEFAULT_VOICE_NAMES
         for path, content in _default_voice_files(voices_names).items():

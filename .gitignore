@@ -32,3 +32,5 @@ instances/
 .DS_Store
 harness.db-shm
 harness.db-wal
+config/check.plist
+config/work.plist

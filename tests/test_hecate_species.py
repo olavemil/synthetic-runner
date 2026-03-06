@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 
 from symbiosis.harness.adapters import Event
@@ -61,29 +60,34 @@ def _event(body="hello"):
 class TestHecateOnMessage:
     def test_two_vote_winner_single_reworded_reply(self):
         """When one suggestion gets 2 votes, a single reworded reply is sent."""
-        call_counts = {"suggest": 0, "vote": 0, "reword": 0}
+        reword_count = [0]
+        suggest_count = [0]
 
         def llm_fn(messages, **kwargs):
             caller = kwargs.get("caller", "")
-            if "suggest" in caller:
-                call_counts["suggest"] += 1
-                return SimpleNamespace(
-                    message=json.dumps({"text": f"suggestion {call_counts['suggest']}", "argument": "arg"})
-                )
+            user_content = messages[-1]["content"] if messages else ""
+
+            # Vote calls return a ranking (new format)
             if "vote" in caller:
-                call_counts["vote"] += 1
-                # Voices 0 and 1 vote for index 1 (Sable's suggestion); voice 2 votes for 0
-                voice_name = caller.split("_")[-1]
-                if voice_name in ("Aria", "Sable"):
-                    return SimpleNamespace(message='{"choice": 1}')
-                else:
-                    return SimpleNamespace(message='{"choice": 0}')
-            if "reword" in caller:
-                call_counts["reword"] += 1
+                # Aria and Lune vote for Sable; Sable votes for Aria (can't vote for itself)
+                voter_name = caller.split("_")[-1]
+                if voter_name in ("Aria", "Lune"):
+                    return SimpleNamespace(message='{"ranking": ["Sable"]}')
+                else:  # Sable votes for Aria
+                    return SimpleNamespace(message='{"ranking": ["Aria"]}')
+
+            # Recompose / reword: message starts with "Rewrite"
+            if user_content.startswith("Rewrite"):
+                reword_count[0] += 1
                 return SimpleNamespace(message="Reworded message.")
-            if "subconscious" in caller:
+
+            # Subconscious update: message contains "subconscious"
+            if "subconscious" in user_content.lower():
                 return SimpleNamespace(message="Subconscious update.")
-            return SimpleNamespace(message="")
+
+            # Suggestion generation
+            suggest_count[0] += 1
+            return SimpleNamespace(message=f"suggestion {suggest_count[0]}")
 
         ctx = DummyCtx(THREE_VOICES_CFG, llm_fn=llm_fn)
         on_message(ctx, [_event()])
@@ -91,8 +95,7 @@ class TestHecateOnMessage:
         assert len(ctx.sent) == 1
         assert ctx.sent[0][0] == "main"
         assert ctx.sent[0][1] == "Reworded message."
-        # Exactly one reword called (for winner)
-        assert call_counts["reword"] == 1
+        assert reword_count[0] == 1
 
     def test_three_way_tie_joined_reply(self):
         """When all 3 get 1 vote each, all 3 rewrites are joined with separator."""
@@ -100,48 +103,47 @@ class TestHecateOnMessage:
 
         def llm_fn(messages, **kwargs):
             caller = kwargs.get("caller", "")
-            if "suggest" in caller:
-                return SimpleNamespace(
-                    message=json.dumps({"text": "a suggestion", "argument": "arg"})
-                )
+            user_content = messages[-1]["content"] if messages else ""
+
             if "vote" in caller:
-                # Each voice votes for a different index (tie)
-                voice_name = caller.split("_")[-1]
-                if voice_name == "Aria":
-                    return SimpleNamespace(message='{"choice": 1}')
-                elif voice_name == "Sable":
-                    return SimpleNamespace(message='{"choice": 2}')
+                # Each voice votes for a different candidate → tie
+                voter_name = caller.split("_")[-1]
+                if voter_name == "Aria":
+                    return SimpleNamespace(message='{"ranking": ["Sable"]}')
+                elif voter_name == "Sable":
+                    return SimpleNamespace(message='{"ranking": ["Lune"]}')
                 else:
-                    return SimpleNamespace(message='{"choice": 0}')
-            if "reword" in caller:
+                    return SimpleNamespace(message='{"ranking": ["Aria"]}')
+
+            if user_content.startswith("Rewrite"):
                 reword_count[0] += 1
                 return SimpleNamespace(message=f"Reword {reword_count[0]}")
-            if "subconscious" in caller:
+
+            if "subconscious" in user_content.lower():
                 return SimpleNamespace(message="sub.")
-            return SimpleNamespace(message="")
+
+            return SimpleNamespace(message="a suggestion")
 
         ctx = DummyCtx(THREE_VOICES_CFG, llm_fn=llm_fn)
         on_message(ctx, [_event()])
 
         assert len(ctx.sent) == 1
         assert "---" in ctx.sent[0][1]
-        # All 3 rewrites joined
         assert reword_count[0] == 3
 
     def test_subconscious_files_written(self):
         """After on_message, each voice's subconscious file is updated."""
         def llm_fn(messages, **kwargs):
             caller = kwargs.get("caller", "")
-            if "suggest" in caller:
-                return SimpleNamespace(message=json.dumps({"text": "t", "argument": "a"}))
+            user_content = messages[-1]["content"] if messages else ""
             if "vote" in caller:
-                return SimpleNamespace(message='{"choice": 1}')
-            if "reword" in caller:
+                return SimpleNamespace(message='{"ranking": ["Sable"]}')
+            if user_content.startswith("Rewrite"):
                 return SimpleNamespace(message="reworded")
-            if "subconscious" in caller:
+            if "subconscious" in user_content.lower():
                 voice_name = caller.split("_")[-1]
                 return SimpleNamespace(message=f"{voice_name} subconscious")
-            return SimpleNamespace(message="")
+            return SimpleNamespace(message="suggestion")
 
         ctx = DummyCtx(THREE_VOICES_CFG, llm_fn=llm_fn)
         on_message(ctx, [_event()])
