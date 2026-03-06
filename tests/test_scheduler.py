@@ -155,6 +155,21 @@ class TestScheduler:
         scheduler.stop()
         assert scheduler._running is False
 
+    def test_check_schedules_ignores_non_cron_and_unknown_schedule_keys(self, tmp_path):
+        scheduler, _ = self._make_scheduler(tmp_path)
+        config = scheduler._registry.get_instance_config("test-1")
+        config.schedule = {
+            "heartbeat": "*/5 * * * *",
+            "max_idle_heartbeats": 3,   # metadata, not cron
+            "unknown_entrypoint": "*/5 * * * *",  # not in manifest
+        }
+
+        scheduler._check_schedules()
+
+        assert "test-1:heartbeat" in scheduler._schedule_state
+        assert "test-1:max_idle_heartbeats" not in scheduler._schedule_state
+        assert "test-1:unknown_entrypoint" not in scheduler._schedule_state
+
     def test_poll_reactive_normalizes_room_to_logical_space(self, tmp_path):
         from symbiosis.harness.adapters import Event
 

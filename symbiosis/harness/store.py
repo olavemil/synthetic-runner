@@ -33,6 +33,13 @@ class NamespacedStore:
         strip = len(self._namespace) + 1
         return [(k[strip:], v) for k, v in results]
 
+    def scan_items(self, prefix: str = "") -> list[tuple[str, object, str | None]]:
+        """Like scan() but also returns owner column: [(key, value, owner), ...]."""
+        full_prefix = self._key(prefix)
+        results = self._db.scan_items(full_prefix)
+        strip = len(self._namespace) + 1
+        return [(k[strip:], v, o) for k, v, o in results]
+
     def count(self, prefix: str = "") -> int:
         return self._db.count(self._key(prefix))
 
@@ -95,6 +102,15 @@ class StoreDB:
                 (prefix + "%",),
             ).fetchall()
         return [(k, json.loads(v)) for k, v in rows]
+
+    def scan_items(self, prefix: str = "") -> list[tuple[str, object, str | None]]:
+        """Return (key, value, owner) triples for all rows matching prefix."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT key, value, owner FROM kv WHERE key LIKE ? ORDER BY key",
+                (prefix + "%",),
+            ).fetchall()
+        return [(k, json.loads(v), o) for k, v, o in rows]
 
     def count(self, prefix: str = "") -> int:
         with self._lock:

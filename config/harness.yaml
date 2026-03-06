@@ -3,13 +3,21 @@ providers:
   type: openai_compat
   base_url: ${LMSTUDIO_BASE_URL}
   api_key: lm-studio
+  max_concurrency: 2
 - id: anthropic
   type: anthropic
   api_key: ${ANTHROPIC_API_KEY}
+
 adapters:
 - id: matrix-main
   type: matrix
   homeserver: ${MATRIX_HOMESERVER}
+
 storage_dir: instances
 store_path: harness.db
 poll_interval: 30
+
+scheduler:
+  check_interval: 300    # seconds between check runs (poll + enqueue)
+  work_interval: 60      # seconds between work runs (drain queue)
+  log_file: logs/symbiosis.log

@@ -149,3 +149,79 @@ class TestLoadInstanceConfig:
 
         result = load_instance_config(config_path)
         assert result.messaging is None
+
+    def test_schedule_with_mixed_types(self, tmp_path):
+        config = {
+            "species": "draum",
+            "provider": "anthropic",
+            "model": "claude-opus-4-6",
+            "schedule": {"heartbeat": "0 * * * *", "max_idle_heartbeats": 3},
+        }
+        config_dir = tmp_path / "config" / "instances"
+        config_dir.mkdir(parents=True)
+        config_path = config_dir / "test.yaml"
+        config_path.write_text(yaml.dump(config))
+
+        result = load_instance_config(config_path)
+        assert result.schedule["heartbeat"] == "0 * * * *"
+        assert result.schedule["max_idle_heartbeats"] == 3
+
+
+class TestSchedulerConfig:
+    def test_defaults(self, tmp_path):
+        config_path = tmp_path / "config" / "harness.yaml"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text("{}")
+
+        from symbiosis.harness.config import load_harness_config, SchedulerConfig
+        result = load_harness_config(config_path)
+        assert isinstance(result.scheduler, SchedulerConfig)
+        assert result.scheduler.check_interval == 300
+        assert result.scheduler.work_interval == 60
+        assert result.scheduler.log_file is None
+
+    def test_custom_values(self, tmp_path):
+        config = {
+            "scheduler": {
+                "check_interval": 120,
+                "work_interval": 30,
+                "log_file": "logs/run.log",
+            }
+        }
+        config_path = tmp_path / "config" / "harness.yaml"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(yaml.dump(config))
+
+        from symbiosis.harness.config import load_harness_config
+        result = load_harness_config(config_path)
+        assert result.scheduler.check_interval == 120
+        assert result.scheduler.work_interval == 30
+        assert result.scheduler.log_file == "logs/run.log"
+
+
+class TestProviderMaxConcurrency:
+    def test_max_concurrency_field(self):
+        from symbiosis.harness.config import ProviderConfig
+        pc = ProviderConfig(id="lmstudio", type="openai_compat", max_concurrency=2)
+        assert pc.max_concurrency == 2
+
+    def test_max_concurrency_default_none(self):
+        from symbiosis.harness.config import ProviderConfig
+        pc = ProviderConfig(id="anthropic", type="anthropic")
+        assert pc.max_concurrency is None
+
+    def test_max_concurrency_parsed_from_yaml(self, tmp_path):
+        config = {
+            "providers": [
+                {"id": "lms", "type": "openai_compat", "max_concurrency": 2},
+                {"id": "anth", "type": "anthropic"},
+            ]
+        }
+        config_path = tmp_path / "config" / "harness.yaml"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(yaml.dump(config))
+
+        from symbiosis.harness.config import load_harness_config
+        result = load_harness_config(config_path)
+        assert result.providers[0].max_concurrency == 2
+        assert result.providers[1].max_concurrency is None

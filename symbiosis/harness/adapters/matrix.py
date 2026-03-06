@@ -21,6 +21,32 @@ class MatrixAdapter(MessagingAdapter):
         self._token = access_token
         self._client = httpx.Client(timeout=30)
 
+    @classmethod
+    def login(
+        cls,
+        homeserver: str,
+        user: str,
+        password: str,
+        device_name: str = "symbiosis",
+    ) -> str:
+        """Log in to a Matrix homeserver with username/password and return the access token."""
+        url = f"{homeserver.rstrip('/')}/_matrix/client/v3/login"
+        resp = httpx.post(
+            url,
+            json={
+                "type": "m.login.password",
+                "identifier": {"type": "m.id.user", "user": user},
+                "password": password,
+                "initial_device_display_name": device_name,
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if "access_token" not in data:
+            raise ValueError(f"Login response missing access_token: {data}")
+        return data["access_token"]
+
     def _url(self, path: str) -> str:
         return f"{self._homeserver}/_matrix/client/v3{path}"
 

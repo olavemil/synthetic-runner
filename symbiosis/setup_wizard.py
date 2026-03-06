@@ -494,12 +494,50 @@ def _configure_instance(
             allow_empty=False,
         )
         token_value = _ask_text(
-            f"{token_env_var} (optional access token)",
+            f"{token_env_var} (leave blank to log in via username/password)",
             input_fn,
             output_fn,
             default=existing_env.get(token_env_var, ""),
             allow_empty=True,
         )
+
+        if not token_value:
+            homeserver_raw = (
+                existing_env.get("MATRIX_HOMESERVER")
+                or env_updates.get("MATRIX_HOMESERVER", "")
+            )
+            if homeserver_raw:
+                do_login = _ask_choice(
+                    f"Fetch token from {homeserver_raw} via Matrix login?",
+                    [("No", "no"), ("Yes", "yes")],
+                    input_fn,
+                    output_fn,
+                    default_index=1,
+                )
+                if do_login == "yes":
+                    matrix_user = _ask_text(
+                        "Matrix username (e.g. @bot:matrix.org or just 'bot')",
+                        input_fn,
+                        output_fn,
+                        default=entity_id,
+                        allow_empty=False,
+                    )
+                    matrix_password = _ask_text(
+                        "Matrix password",
+                        input_fn,
+                        output_fn,
+                        allow_empty=False,
+                    )
+                    try:
+                        from symbiosis.harness.adapters.matrix import MatrixAdapter
+                        token_value = MatrixAdapter.login(
+                            homeserver_raw, matrix_user, matrix_password
+                        )
+                        output_fn(f"Login successful. Token saved to {token_env_var}.")
+                    except Exception as exc:
+                        output_fn(f"Login failed: {exc}")
+                        output_fn(f"You can set {token_env_var} manually in .env later.")
+
         env_updates[token_env_var] = token_value
 
         spaces = []

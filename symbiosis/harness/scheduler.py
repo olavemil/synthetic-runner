@@ -200,6 +200,7 @@ class Scheduler:
         for instance_config in self._registry.list_instances():
             instance_id = instance_config.instance_id
             manifest = self._registry.get_manifest(instance_config.species)
+            manifest_entrypoints = {ep.name for ep in manifest.entry_points}
 
             for ep in manifest.entry_points:
                 if not ep.schedule:
@@ -224,6 +225,19 @@ class Scheduler:
 
             # Also check instance-level schedule overrides
             for ep_name, cron_expr in instance_config.schedule.items():
+                if not isinstance(cron_expr, str):
+                    logger.debug(
+                        "Ignoring non-cron schedule metadata %s=%r for %s",
+                        ep_name, cron_expr, instance_id,
+                    )
+                    continue
+                if ep_name not in manifest_entrypoints:
+                    logger.debug(
+                        "Ignoring schedule override for unknown entry point %s on %s",
+                        ep_name, instance_id,
+                    )
+                    continue
+
                 key = f"{instance_id}:{ep_name}"
                 if key not in self._schedule_state:
                     cron = croniter(cron_expr, now)

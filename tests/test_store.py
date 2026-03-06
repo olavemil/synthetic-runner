@@ -63,6 +63,16 @@ class TestStoreDB:
         db = open_store()
         assert not db.release("nope", "worker-a")
 
+    def test_scan_items(self):
+        db = open_store()
+        db.put("k1", "a")
+        db.claim("k2", "worker-x")
+        items = db.scan_items("")
+        assert len(items) == 2
+        item_map = {k: (v, o) for k, v, o in items}
+        assert item_map["k1"] == ("a", None)
+        assert item_map["k2"][1] == "worker-x"
+
 
 class TestNamespacedStore:
     def test_namespacing(self):
@@ -106,3 +116,14 @@ class TestNamespacedStore:
         s.put("k", "v")
         s.delete("k")
         assert s.get("k") is None
+
+    def test_scan_items(self):
+        db = open_store()
+        s = NamespacedStore(db, "test")
+        s.put("a", 1)
+        s.claim("b", "owner1")
+        items = s.scan_items()
+        assert len(items) == 2
+        item_map = {k: (v, o) for k, v, o in items}
+        assert item_map["a"] == (1, None)
+        assert item_map["b"][1] == "owner1"

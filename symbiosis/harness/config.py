@@ -48,11 +48,19 @@ def _load_env(env_path: Path | None = None) -> dict[str, str | None]:
 
 
 @dataclass
+class SchedulerConfig:
+    check_interval: int = 300   # seconds between check runs
+    work_interval: int = 60     # seconds between work runs
+    log_file: str | None = None
+
+
+@dataclass
 class ProviderConfig:
     id: str
     type: str
     base_url: str | None = None
     api_key: str | None = None
+    max_concurrency: int | None = None
 
 
 @dataclass
@@ -70,6 +78,7 @@ class HarnessConfig:
     storage_dir: str = "instances"
     store_path: str = "harness.db"
     poll_interval: int = 30
+    scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
 
     def get_provider(self, provider_id: str) -> ProviderConfig:
         for p in self.providers:
@@ -105,7 +114,7 @@ class InstanceConfig:
     provider: str
     model: str
     messaging: MessagingConfig | None = None
-    schedule: dict[str, str] = field(default_factory=dict)
+    schedule: dict[str, object] = field(default_factory=dict)
     extra: dict = field(default_factory=dict)
 
 
@@ -129,12 +138,20 @@ def load_harness_config(
         AdapterConfig(**a) for a in resolved.get("adapters", [])
     ]
 
+    scheduler_raw = resolved.get("scheduler", {})
+    scheduler = SchedulerConfig(
+        check_interval=int(scheduler_raw.get("check_interval", 300)),
+        work_interval=int(scheduler_raw.get("work_interval", 60)),
+        log_file=scheduler_raw.get("log_file"),
+    )
+
     return HarnessConfig(
         providers=providers,
         adapters=adapters,
         storage_dir=resolved.get("storage_dir", "instances"),
         store_path=resolved.get("store_path", "harness.db"),
         poll_interval=resolved.get("poll_interval", 30),
+        scheduler=scheduler,
     )
 
 
