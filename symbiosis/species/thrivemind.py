@@ -1,30 +1,32 @@
-"""Thrivemind species — distributed hivemind coordination on shared toolkit primitives."""
+"""Thrivemind species — single-instance colony deliberation."""
 
 from __future__ import annotations
 
-import json
 import logging
+import math
 from typing import TYPE_CHECKING
 
 from symbiosis.species import Species, SpeciesManifest, EntryPoint
 from symbiosis.toolkit.hivemind import (
-    HivemindConfig,
-    load_hivemind_config,
-    register_member,
-    claim_fresh_events,
-    create_round_from_events,
-    list_open_rounds,
-    get_candidates,
-    get_votes,
-    submit_candidate,
-    submit_vote,
-    generate_candidate_message,
+    ThrivemindConfig,
+    load_config,
+    load_colony,
+    save_colony,
+    spawn_initial_colony,
+    load_constitution,
+    save_constitution,
+    select_suggesters,
+    generate_suggestion,
     generate_vote,
     tally_borda,
-    compose_consensus_output,
-    round_ready,
-    mark_round_finalized,
+    write_message,
+    contribute_constitution_line,
+    rewrite_constitution,
+    vote_constitution,
+    run_spawn_cycle,
+    update_approvals,
 )
+from symbiosis.toolkit.prompts import format_events
 
 if TYPE_CHECKING:
     from symbiosis.harness.adapters import Event
@@ -32,144 +34,95 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-
 DEFAULT_FILES = {
-    "hivemind.md": "# Hivemind\n",
-    "voice.md": "# Voice\n",
+    "constitution.md": "# Constitution\n",
     "sessions.md": "# Sessions\n",
 }
 
 
-def _contribute_round(ctx: InstanceContext, cfg: HivemindConfig, round_data: dict) -> None:
-    round_id = str(round_data["id"])
-    candidates = get_candidates(ctx, round_id)
+def on_message(ctx: InstanceContext, events: list[Event]) -> None:
+    """Run colony deliberation round on incoming events."""
+    if not events:
+        return
 
-    if ctx.instance_id not in candidates:
-        candidate_text = generate_candidate_message(ctx, round_data, cfg)
-        if candidate_text:
-            submit_candidate(
-                ctx,
-                round_id,
-                ctx.instance_id,
-                candidate_text,
-                persona=cfg.persona,
-                max_chars=cfg.max_internal_chars,
-            )
-            candidates = get_candidates(ctx, round_id)
+    cfg = load_config(ctx)
+    colony = load_colony(ctx)
+    if not colony:
+        colony = spawn_initial_colony(cfg)
+        save_colony(ctx, colony)
+
+    constitution = load_constitution(ctx)
+    prompt = format_events(events)
+
+    # Select suggesters (approval-weighted)
+    n_suggesters = max(1, math.ceil(cfg.colony_size * cfg.suggestion_fraction))
+    suggesters = select_suggesters(colony, n_suggesters)
+
+    # Generate candidate suggestions
+    candidates: dict[str, str] = {}
+    for individual in suggesters:
+        text = generate_suggestion(ctx, individual, prompt, cfg)
+        if text:
+            candidates[individual.id] = text
 
     if not candidates:
         return
 
-    votes = get_votes(ctx, round_id)
-    if ctx.instance_id not in votes:
-        ranking, rationale = generate_vote(ctx, round_data, cfg, candidates)
-        submit_vote(ctx, round_id, ctx.instance_id, ranking, rationale)
+    # All colony members vote
+    votes: dict[str, list[str]] = {}
+    for individual in colony:
+        ranking = generate_vote(ctx, individual, candidates, prompt, cfg)
+        votes[individual.id] = ranking
 
+    tally = tally_borda(candidates, votes)
+    winner_id = tally["winner_member"]
+    winner_text = tally["winner_message"]
 
-def _emit_message(ctx: InstanceContext, cfg: HivemindConfig, message: str) -> None:
-    if not message:
-        return
+    # Check consensus
+    total_score = sum(tally["scores"].values())
+    winner_score = tally["scores"].get(winner_id, 0)
+    has_consensus = total_score == 0 or (winner_score / total_score) > cfg.consensus_threshold
 
-    if cfg.can_speak:
-        ctx.send(cfg.voice_space, message)
-        return
+    if has_consensus or len(candidates) == 1:
+        final = write_message(ctx, prompt, winner_text, candidates, constitution, cfg)
+        ctx.send(cfg.voice_space, final)
 
-    if cfg.speaker_instance:
-        payload = json.dumps(
-            {
-                "kind": "hivemind_output",
-                "space": cfg.voice_space,
-                "message": message,
-            }
-        )
-        ctx.send_to(cfg.speaker_instance, payload)
-
-
-def _finalize_ready_rounds(ctx: InstanceContext, cfg: HivemindConfig) -> None:
-    if not cfg.can_coordinate:
-        return
-
-    for round_data in list_open_rounds(ctx):
-        round_id = str(round_data["id"])
-        candidates = get_candidates(ctx, round_id)
-        votes = get_votes(ctx, round_id)
-
-        if not round_ready(
-            round_data,
-            candidate_count=len(candidates),
-            vote_count=len(votes),
-            quorum=cfg.quorum,
-            timeout_s=cfg.round_timeout_s,
-        ):
-            continue
-        if not candidates:
-            continue
-
-        tally = tally_borda(candidates, votes)
-        final_message = compose_consensus_output(ctx, round_data, cfg, tally, candidates)
-        mark_round_finalized(
-            ctx,
-            round_data,
-            final_message=final_message,
-            winner_member=str(tally["winner_member"]),
-        )
-        _emit_message(ctx, cfg, final_message)
-
-
-def _drain_speaker_inbox(ctx: InstanceContext, cfg: HivemindConfig) -> None:
-    if not cfg.can_speak:
-        return
-
-    for msg in ctx.read_inbox():
-        body = str(msg.get("body", ""))
-        if not body:
-            continue
-        try:
-            payload = json.loads(body)
-            if isinstance(payload, dict):
-                space = str(payload.get("space", cfg.voice_space))
-                message = str(payload.get("message", ""))
-                if message:
-                    ctx.send(space, message)
-                    continue
-        except json.JSONDecodeError:
-            pass
-        ctx.send(cfg.voice_space, body)
-
-
-def on_message(ctx: InstanceContext, events: list[Event]) -> None:
-    """Create hivemind round from external events, then contribute/finalize if role allows."""
-    if not events:
-        return
-
-    cfg = load_hivemind_config(ctx)
-    register_member(ctx, cfg)
-    if not cfg.can_coordinate:
-        return
-
-    fresh_events = claim_fresh_events(ctx, events)
-    if not fresh_events:
-        return
-
-    source_space = next((evt.room for evt in fresh_events if evt.room), cfg.voice_space)
-    round_data = create_round_from_events(ctx, fresh_events, source_space=source_space)
-
-    if cfg.can_work:
-        _contribute_round(ctx, cfg, round_data)
-    _finalize_ready_rounds(ctx, cfg)
+    # Update approvals and persist
+    colony = update_approvals(colony, votes, winner_id, cfg)
+    save_colony(ctx, colony)
 
 
 def heartbeat(ctx: InstanceContext) -> None:
-    """Periodic worker contribution and coordinator finalization cycle."""
-    cfg = load_hivemind_config(ctx)
-    register_member(ctx, cfg)
+    """Constitution update and spawn cycle."""
+    cfg = load_config(ctx)
+    colony = load_colony(ctx)
+    if not colony:
+        colony = spawn_initial_colony(cfg)
+        save_colony(ctx, colony)
 
-    for round_data in list_open_rounds(ctx):
-        if cfg.can_work:
-            _contribute_round(ctx, cfg, round_data)
+    constitution = load_constitution(ctx)
 
-    _finalize_ready_rounds(ctx, cfg)
-    _drain_speaker_inbox(ctx, cfg)
+    # Each individual contributes a constitution line
+    lines = []
+    for individual in colony:
+        line = contribute_constitution_line(ctx, individual, constitution, cfg)
+        if line:
+            lines.append(line)
+
+    # Synthesize proposed constitution
+    proposed = rewrite_constitution(ctx, lines, constitution, cfg)
+
+    # Each individual votes on the proposed constitution
+    votes_accept = sum(
+        1 for individual in colony if vote_constitution(ctx, individual, constitution, proposed, cfg)
+    )
+    total = len(colony)
+    if total > 0 and (votes_accept / total) > cfg.consensus_threshold:
+        save_constitution(ctx, proposed)
+
+    # Run spawn cycle
+    colony = run_spawn_cycle(colony, cfg)
+    save_colony(ctx, colony)
 
 
 class ThrivemindSpecies(Species):

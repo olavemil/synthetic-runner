@@ -1,112 +1,305 @@
-"""Tests for reusable hivemind toolkit primitives."""
+"""Tests for single-instance colony toolkit (Thrivemind)."""
 
-from types import SimpleNamespace
+from __future__ import annotations
 
-from symbiosis.harness.adapters import Event
+import random
+import time
+
 from symbiosis.harness.store import open_store, NamespacedStore
 from symbiosis.toolkit.hivemind import (
-    load_hivemind_config,
-    claim_fresh_events,
-    create_round_from_events,
-    get_round,
-    submit_candidate,
-    submit_vote,
-    get_candidates,
-    get_votes,
+    AXIS_NAMES,
+    Individual,
+    ThrivemindConfig,
+    format_persona,
+    select_suggesters,
     tally_borda,
-    round_ready,
+    run_spawn_cycle,
+    update_approvals,
+    load_colony,
+    save_colony,
+    spawn_initial_colony,
+    load_config,
 )
 
 
+# ---------------------------------------------------------------------------
+# Minimal mock context for colony store tests
+# ---------------------------------------------------------------------------
+
+
 class DummyCtx:
-    def __init__(self, instance_id: str, store_db, hivemind_cfg=None):
+    def __init__(self, instance_id: str, store_db, thrivemind_cfg=None, files=None):
         self.instance_id = instance_id
         self._store_db = store_db
-        self._hivemind_cfg = hivemind_cfg or {}
+        self._thrivemind_cfg = thrivemind_cfg or {}
+        self._files: dict[str, str] = files or {}
 
     def config(self, key: str):
-        if key == "hivemind":
-            return self._hivemind_cfg
+        if key == "thrivemind":
+            return self._thrivemind_cfg
         return None
 
-    def shared_store(self, namespace: str):
-        return NamespacedStore(self._store_db, f"species:test:{namespace}")
+    def store(self, namespace: str):
+        return NamespacedStore(self._store_db, f"instance:{self.instance_id}:{namespace}")
 
-    def llm(self, messages, **kwargs):  # noqa: ARG002
-        return SimpleNamespace(message="")
+    def read(self, path: str) -> str:
+        return self._files.get(path, "")
+
+    def write(self, path: str, content: str) -> None:
+        self._files[path] = content
+
+    def exists(self, path: str) -> bool:
+        return path in self._files
 
 
-class TestHivemindToolkit:
-    def test_load_hivemind_config_defaults_and_custom(self):
-        db = open_store()
-        default_ctx = DummyCtx("a", db)
-        cfg = load_hivemind_config(default_ctx)
-        assert cfg.role == "speaker_coordinator"
-        assert cfg.quorum == 3
-        assert cfg.voice_space == "main"
+# ---------------------------------------------------------------------------
+# format_persona
+# ---------------------------------------------------------------------------
 
-        custom_ctx = DummyCtx(
-            "b",
-            db,
-            hivemind_cfg={"role": "worker", "quorum": 5, "voice_space": "lobby"},
-        )
-        custom = load_hivemind_config(custom_ctx)
-        assert custom.role == "worker"
-        assert custom.quorum == 5
-        assert custom.voice_space == "lobby"
 
-    def test_claim_fresh_events_is_shared_and_deduped(self):
-        db = open_store()
-        ctx_a = DummyCtx("agent-a", db)
-        ctx_b = DummyCtx("agent-b", db)
-        evt = Event(event_id="$1", sender="@u:matrix.org", body="hi", timestamp=1, room="main")
+def _ind(dims: dict[str, float]) -> Individual:
+    return Individual(id="test", dims=dims, approval=0, created_at=0)
 
-        first = claim_fresh_events(ctx_a, [evt])
-        second = claim_fresh_events(ctx_b, [evt])
 
-        assert len(first) == 1
-        assert second == []
+class TestFormatPersona:
+    def test_extreme_trait(self):
+        dims = {name: 0.0 for name in AXIS_NAMES}
+        dims["conservative_liberal"] = 0.9  # extremely liberal (positive pole: conservative)
+        ind = _ind(dims)
+        result = format_persona(ind)
+        assert "extremely" in result
+        assert "conservative" in result
 
-    def test_round_and_voting_lifecycle(self):
-        db = open_store()
-        ctx = DummyCtx("agent-a", db)
-        evt = Event(event_id="$1", sender="@u:matrix.org", body="hi", timestamp=1, room="main")
-        round_data = create_round_from_events(ctx, [evt], source_space="main")
-        round_id = round_data["id"]
+    def test_negative_pole(self):
+        dims = {name: 0.0 for name in AXIS_NAMES}
+        dims["optimistic_pessimistic"] = -0.7
+        ind = _ind(dims)
+        result = format_persona(ind)
+        assert "very" in result
+        assert "pessimistic" in result
 
-        submit_candidate(
-            ctx,
-            round_id,
-            "worker-1",
-            "option one",
-            persona="bold",
-            max_chars=280,
-        )
-        submit_candidate(
-            ctx,
-            round_id,
-            "worker-2",
-            "option two",
-            persona="calm",
-            max_chars=280,
-        )
-        submit_vote(ctx, round_id, "worker-1", ["worker-2", "worker-1"], "prefer two")
-        submit_vote(ctx, round_id, "worker-2", ["worker-2", "worker-1"], "agree")
+    def test_midrange_label(self):
+        dims = {name: 0.0 for name in AXIS_NAMES}
+        dims["cautious_bold"] = 0.5
+        ind = _ind(dims)
+        result = format_persona(ind)
+        assert "fairly" in result
+        assert "cautious" in result
 
-        candidates = get_candidates(ctx, round_id)
-        votes = get_votes(ctx, round_id)
+    def test_all_near_zero_fallback(self):
+        dims = {name: 0.0 for name in AXIS_NAMES}
+        # Set one tiny non-zero value
+        dims["analytical_emotional"] = 0.1
+        ind = _ind(dims)
+        result = format_persona(ind)
+        # Should fall back to "barely <axis>"
+        assert "barely" in result
+        assert "analytical" in result
+
+    def test_traits_ordered_by_magnitude(self):
+        dims = {name: 0.0 for name in AXIS_NAMES}
+        dims["conservative_liberal"] = 0.3   # somewhat
+        dims["analytical_emotional"] = 0.85  # extremely
+        ind = _ind(dims)
+        result = format_persona(ind)
+        # analytical should appear before conservative
+        assert result.index("analytical") < result.index("conservative")
+
+
+# ---------------------------------------------------------------------------
+# select_suggesters
+# ---------------------------------------------------------------------------
+
+
+class TestSelectSuggesters:
+    def _colony(self, approvals: list[int]) -> list[Individual]:
+        return [
+            Individual(id=str(i), dims={n: 0.0 for n in AXIS_NAMES}, approval=a, created_at=0)
+            for i, a in enumerate(approvals)
+        ]
+
+    def test_approval_weighting_favors_higher(self):
+        colony = self._colony([0, 5, 5, 5])
+        rng = random.Random(42)
+        counts = {ind.id: 0 for ind in colony}
+        for _ in range(200):
+            selected = select_suggesters(colony, 1, rng=rng)
+            counts[selected[0].id] += 1
+        # Individual 0 has approval=0, weight=1; others have weight=6
+        # So id "0" should be selected less often
+        assert counts["0"] < counts["1"]
+
+    def test_negative_approval_excluded(self):
+        colony = self._colony([-5, -5, -5])
+        # All weights are 0 after max(0, approval+1) = 0 for approval=-5
+        # Falls back to uniform — should still return n items
+        rng = random.Random(1)
+        result = select_suggesters(colony, 2, rng=rng)
+        assert len(result) == 2
+
+    def test_n_greater_than_colony_size_caps(self):
+        colony = self._colony([1, 2, 3])
+        result = select_suggesters(colony, 10)
+        assert len(result) == 3
+
+    def test_no_duplicates(self):
+        colony = self._colony([1, 2, 3, 4])
+        rng = random.Random(7)
+        for _ in range(50):
+            result = select_suggesters(colony, 3, rng=rng)
+            ids = [ind.id for ind in result]
+            assert len(ids) == len(set(ids))
+
+
+# ---------------------------------------------------------------------------
+# tally_borda
+# ---------------------------------------------------------------------------
+
+
+class TestTallyBorda:
+    def test_correct_winner(self):
+        candidates = {"a": "option a", "b": "option b", "c": "option c"}
+        votes = {
+            "v1": ["b", "a", "c"],
+            "v2": ["b", "c", "a"],
+            "v3": ["a", "b", "c"],
+        }
         tally = tally_borda(candidates, votes)
+        assert tally["winner_member"] == "b"
+        assert tally["candidate_count"] == 3
+        assert tally["vote_count"] == 3
 
-        assert tally["winner_member"] == "worker-2"
-        assert tally["candidate_count"] == 2
-        assert tally["vote_count"] == 2
+    def test_returns_correct_fields(self):
+        candidates = {"x": "text x", "y": "text y"}
+        votes = {"v1": ["x", "y"]}
+        tally = tally_borda(candidates, votes)
+        assert "winner_member" in tally
+        assert "winner_message" in tally
+        assert "scores" in tally
+        assert tally["winner_message"] == "text x"
 
-        stored_round = get_round(ctx, round_id)
-        assert stored_round is not None
-        assert round_ready(
-            stored_round,
-            candidate_count=2,
-            vote_count=2,
-            quorum=2,
-            timeout_s=45,
+    def test_no_votes_all_score_one(self):
+        candidates = {"a": "aa", "b": "bb"}
+        tally = tally_borda(candidates, {})
+        assert tally["scores"]["a"] == 1
+        assert tally["scores"]["b"] == 1
+
+    def test_single_candidate_wins(self):
+        candidates = {"only": "text"}
+        tally = tally_borda(candidates, {})
+        assert tally["winner_member"] == "only"
+
+
+# ---------------------------------------------------------------------------
+# run_spawn_cycle
+# ---------------------------------------------------------------------------
+
+
+def _make_colony(approvals: list[int], cfg: ThrivemindConfig) -> list[Individual]:
+    now = int(time.time())
+    return [
+        Individual(
+            id=str(i),
+            dims={n: 0.1 for n in AXIS_NAMES},
+            approval=a,
+            created_at=now,
         )
+        for i, a in enumerate(approvals)
+    ]
+
+
+class TestRunSpawnCycle:
+    def test_colony_stays_at_target_size(self):
+        cfg = ThrivemindConfig(colony_size=6, approval_threshold=2)
+        colony = _make_colony([0, 0, 0, 3, 4, 5], cfg)
+        rng = random.Random(42)
+        new_colony = run_spawn_cycle(colony, cfg, rng=rng)
+        assert len(new_colony) == cfg.colony_size
+
+    def test_no_eligible_returns_unchanged(self):
+        cfg = ThrivemindConfig(colony_size=4, approval_threshold=5)
+        colony = _make_colony([0, 1, 2, 3], cfg)
+        new_colony = run_spawn_cycle(colony, cfg)
+        assert len(new_colony) == len(colony)
+        assert {ind.id for ind in new_colony} == {ind.id for ind in colony}
+
+    def test_offspring_have_zero_approval(self):
+        cfg = ThrivemindConfig(colony_size=4, approval_threshold=2)
+        colony = _make_colony([0, 0, 3, 4], cfg)
+        rng = random.Random(99)
+        new_colony = run_spawn_cycle(colony, cfg, rng=rng)
+        # All new individuals (id not in original) should have approval=0
+        original_ids = {ind.id for ind in colony}
+        for ind in new_colony:
+            if ind.id not in original_ids:
+                assert ind.approval == 0
+
+    def test_eligible_individuals_removed(self):
+        cfg = ThrivemindConfig(colony_size=4, approval_threshold=3)
+        colony = _make_colony([0, 0, 4, 5], cfg)
+        rng = random.Random(1)
+        new_colony = run_spawn_cycle(colony, cfg, rng=rng)
+        new_ids = {ind.id for ind in new_colony}
+        # The two eligible individuals (ids "2" and "3") should be replaced
+        assert "2" not in new_ids
+        assert "3" not in new_ids
+
+    def test_dim_inheritance(self):
+        cfg = ThrivemindConfig(colony_size=2, approval_threshold=1)
+        primary = Individual(
+            id="parent",
+            dims={n: 0.5 for n in AXIS_NAMES},
+            approval=3,
+            created_at=0,
+        )
+        colony = [primary]
+        rng = random.Random(0)
+        new_colony = run_spawn_cycle(colony, cfg, rng=rng)
+        assert len(new_colony) == 2
+        for ind in new_colony:
+            for val in ind.dims.values():
+                assert -1.0 <= val <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# update_approvals
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateApprovals:
+    def _colony(self, ids_approvals: list[tuple[str, int]]) -> list[Individual]:
+        return [
+            Individual(id=i, dims={n: 0.0 for n in AXIS_NAMES}, approval=a, created_at=0)
+            for i, a in ids_approvals
+        ]
+
+    def test_winner_gets_plus_one_per_first_place_voter(self):
+        colony = self._colony([("a", 0), ("b", 0), ("c", 0)])
+        votes = {
+            "a": ["b", "a", "c"],
+            "c": ["b", "c", "a"],
+        }
+        cfg = ThrivemindConfig()
+        updated = update_approvals(colony, votes, "b", cfg)
+        id_map = {ind.id: ind for ind in updated}
+        # "b" won; 2 voters ranked "b" first → +2
+        assert id_map["b"].approval == 2
+
+    def test_non_winner_voter_loses_one(self):
+        colony = self._colony([("a", 0), ("b", 0)])
+        # voter "a" ranked "a" first, but "b" won
+        votes = {
+            "a": ["a", "b"],
+            "b": ["b", "a"],
+        }
+        cfg = ThrivemindConfig()
+        updated = update_approvals(colony, votes, "b", cfg)
+        id_map = {ind.id: ind for ind in updated}
+        assert id_map["a"].approval == -1
+        assert id_map["b"].approval == 1  # voter "b" ranked "b" first → +1
+
+    def test_no_votes_no_change(self):
+        colony = self._colony([("x", 5)])
+        cfg = ThrivemindConfig()
+        updated = update_approvals(colony, {}, "x", cfg)
+        assert updated[0].approval == 5
