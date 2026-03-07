@@ -10,6 +10,7 @@ from symbiosis.toolkit.identity import AXIS_NAMES, Identity, format_persona
 from symbiosis.toolkit.voting import borda_tally
 from symbiosis.toolkit.hivemind import (
     ThrivemindConfig,
+    build_colony_snapshot,
     select_suggesters,
     run_spawn_cycle,
     update_approvals,
@@ -94,6 +95,22 @@ class TestFormatPersona:
         dims["analytical_emotional"] = 0.85
         result = format_persona(_ind(dims))
         assert result.index("analytical") < result.index("conservative")
+
+
+class TestColonySnapshot:
+    def test_build_colony_snapshot_contains_table_and_sorted_by_approval(self):
+        colony = [
+            Identity(name="a", dims={n: 0.0 for n in AXIS_NAMES}, approval=1, created_at=1),
+            Identity(name="b", dims={n: 0.0 for n in AXIS_NAMES}, approval=3, created_at=1),
+        ]
+
+        snapshot = build_colony_snapshot(colony)
+
+        assert "# Colony" in snapshot
+        assert "| Individual | Personality | Approval |" in snapshot
+        assert "| `b` |" in snapshot
+        assert "| `a` |" in snapshot
+        assert snapshot.index("| `b` |") < snapshot.index("| `a` |")
 
 
 # ---------------------------------------------------------------------------

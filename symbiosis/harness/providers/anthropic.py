@@ -13,7 +13,18 @@ from . import LLMProvider, LLMResponse, ToolCall
 
 logger = logging.getLogger(__name__)
 
-THINK_PATTERN = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+THINK_PATTERN = re.compile(
+    r"(?is)<\s*(think|thinking|analysis|reasoning)\b[^>]*>.*?<\s*/\s*\1\s*>"
+)
+THINK_FENCE_PATTERN = re.compile(
+    r"(?is)```(?:\s*(?:think|thinking|analysis|reasoning)[^\n]*)\n.*?```"
+)
+THINK_LINE_PATTERN = re.compile(
+    r"(?im)^\s*<\s*(?:think|thinking|analysis|reasoning)\b[^>]*>.*$"
+)
+THINK_SINGLE_TAG_PATTERN = re.compile(
+    r"(?is)</?\s*(?:think|thinking|analysis|reasoning)\b[^>]*>"
+)
 
 RETRY_DELAYS = [10, 20, 40, 80]
 
@@ -110,7 +121,11 @@ class AnthropicProvider(LLMProvider):
                 )
 
         content = "\n".join(content_parts)
-        content = THINK_PATTERN.sub("", content).strip()
+        content = THINK_PATTERN.sub("", content)
+        content = THINK_FENCE_PATTERN.sub("", content)
+        content = THINK_LINE_PATTERN.sub("", content)
+        content = THINK_SINGLE_TAG_PATTERN.sub("", content)
+        content = content.strip()
 
         finish_reason_map = {
             "end_turn": "stop",

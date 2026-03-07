@@ -83,6 +83,23 @@ class TestGenerateWithIdentity:
         generate_with_identity(ctx, identity, "prompt", context="some context")
         assert "some context" in captured.get("system", "")
 
+    def test_strips_think_blocks_from_response(self):
+        ctx = DummyCtx(
+            lambda msgs, **kw: SimpleNamespace(  # noqa: ARG005
+                message=(
+                    "<think>private chain</think>\n"
+                    "```thinking\ninternal notes\n```\n"
+                    "<think>line without close tag\n"
+                    "Visible answer."
+                )
+            )
+        )
+        identity = _voice("Aria")
+        result = generate_with_identity(ctx, identity, "prompt")
+        assert "private chain" not in result
+        assert "internal notes" not in result
+        assert result == "Visible answer."
+
 
 class TestMultiGenerate:
     def test_returns_dict_keyed_by_name(self):
@@ -97,6 +114,31 @@ class TestMultiGenerate:
         result = multi_generate(ctx, voices, "prompt")
         assert set(result.keys()) == {"Aria", "Sable", "Lune"}
         assert call_count[0] == 3
+
+    def test_context_by_identity_overrides_shared_context(self):
+        captured: dict[str, str] = {}
+
+        def llm_fn(msgs, **kw):
+            captured[kw.get("caller", "")] = kw.get("system", "")
+            return SimpleNamespace(message="ok")
+
+        ctx = DummyCtx(llm_fn)
+        voices = [_voice("Aria"), _voice("Sable")]
+        multi_generate(
+            ctx,
+            voices,
+            "prompt",
+            context="shared-context",
+            context_by_identity={
+                "Aria": "aria-context",
+                "Sable": "sable-context",
+            },
+        )
+
+        assert "aria-context" in captured["generate_Aria"]
+        assert "sable-context" in captured["generate_Sable"]
+        assert "shared-context" not in captured["generate_Aria"]
+        assert "shared-context" not in captured["generate_Sable"]
 
 
 class TestMultiVote:
@@ -151,6 +193,36 @@ class TestMultiVote:
         # Should not raise; all candidates included in each ranking
         for ranking in votes.values():
             assert set(ranking) == {"Aria", "Sable"}
+
+    def test_vote_context_by_identity_overrides_shared_context(self):
+        prompts: dict[str, str] = {}
+
+        def llm_fn(msgs, **kw):
+            prompts[kw.get("caller", "")] = msgs[-1]["content"]
+            return SimpleNamespace(message='{"ranking": ["Aria", "Sable", "Lune"]}')
+
+        ctx = DummyCtx(llm_fn)
+        voices = self._voices()
+        candidates = {"Aria": "text a", "Sable": "text b", "Lune": "text c"}
+        multi_vote(
+            ctx,
+            voices,
+            candidates,
+            "prompt",
+            vote_context="shared-vote-context",
+            vote_context_by_identity={
+                "Aria": "aria-vote-context",
+                "Sable": "sable-vote-context",
+                "Lune": "lune-vote-context",
+            },
+        )
+
+        assert "aria-vote-context" in prompts["vote_Aria"]
+        assert "sable-vote-context" in prompts["vote_Sable"]
+        assert "lune-vote-context" in prompts["vote_Lune"]
+        assert "shared-vote-context" not in prompts["vote_Aria"]
+        assert "shared-vote-context" not in prompts["vote_Sable"]
+        assert "shared-vote-context" not in prompts["vote_Lune"]
 
 
 class TestDeliberate:
@@ -239,6 +311,19 @@ class TestRecompose:
         assert result == "reworded"
         assert "the winning text" in captured[0]
 
+    def test_forwards_max_tokens(self):
+        captured_kwargs = {}
+
+        def llm_fn(msgs, **kw):
+            captured_kwargs.update(kw)
+            return SimpleNamespace(message="reworded")
+
+        ctx = DummyCtx(llm_fn)
+        identity = _voice("Colony")
+        result = recompose(ctx, identity, "winner", max_tokens=321)
+        assert result == "reworded"
+        assert captured_kwargs.get("max_tokens") == 321
+
 
 class TestThinkWithContext:
     def test_returns_thought(self):
@@ -258,6 +343,9 @@ class TestThinkWithContext:
         identity = _voice("Aria")
         think_with_context(ctx, identity, others_thinking={"Sable": "sable thought"})
         assert "sable thought" in captured[0]
+        assert "one of three internal voices guiding and directing the same entity" in captured[0]
+        assert "Other voices' thoughts (not yours)" in captured[0]
+        assert "someone else's perspective" in captured[0]
 
     def test_voice_memory_included_in_context(self):
         captured = []

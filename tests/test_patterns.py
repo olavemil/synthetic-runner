@@ -71,6 +71,9 @@ class TestComposeResponse:
 
         result = compose_response(ctx, {"guidance": "be friendly"})
         assert result == "Hi there!"
+        called_user = ctx.llm.call_args.kwargs["messages"][0]["content"]
+        assert "Include a clear self-identification as Draum" in called_user
+        assert "but phrasing does not need to be verbatim." in called_user
 
     def test_returns_none_for_null(self):
         from symbiosis.toolkit.patterns import compose_response

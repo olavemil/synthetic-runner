@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
 from typing import TYPE_CHECKING
 
 from symbiosis.toolkit.identity import Identity, format_persona, parse_model
@@ -11,6 +13,28 @@ from symbiosis.toolkit.voting import borda_tally
 if TYPE_CHECKING:
     from symbiosis.harness.context import InstanceContext
 
+logger = logging.getLogger(__name__)
+_THINK_TAG_RE = re.compile(
+    r"(?is)<\s*(think|thinking|analysis|reasoning)\b[^>]*>.*?<\s*/\s*\1\s*>"
+)
+_THINK_FENCE_RE = re.compile(
+    r"(?is)```(?:\s*(?:think|thinking|analysis|reasoning)[^\n]*)\n.*?```"
+)
+_THINK_LINE_RE = re.compile(
+    r"(?im)^\s*<\s*(?:think|thinking|analysis|reasoning)\b[^>]*>.*$"
+)
+_THINK_SINGLE_TAG_RE = re.compile(
+    r"(?is)</?\s*(?:think|thinking|analysis|reasoning)\b[^>]*>"
+)
+
+
+def _strip_reasoning_blocks(text: str) -> str:
+    cleaned = _THINK_TAG_RE.sub(" ", text or "")
+    cleaned = _THINK_FENCE_RE.sub(" ", cleaned)
+    cleaned = _THINK_LINE_RE.sub(" ", cleaned)
+    cleaned = _THINK_SINGLE_TAG_RE.sub(" ", cleaned)
+    return cleaned.strip()
+
 
 def generate_with_identity(
     ctx: InstanceContext,
@@ -18,6 +42,7 @@ def generate_with_identity(
     prompt: str,
     context: str = "",
     model: str = "",
+    max_tokens: int = 512,
 ) -> str:
     """Generate text via the identity's model/provider, with persona in system prompt.
 
@@ -42,7 +67,7 @@ def generate_with_identity(
         use_provider = identity.provider
 
     kwargs: dict = {
-        "max_tokens": 512,
+        "max_tokens": max_tokens,
         "caller": f"generate_{identity.name}",
     }
     if system:
@@ -53,7 +78,27 @@ def generate_with_identity(
         kwargs["provider"] = use_provider
 
     response = ctx.llm([{"role": "user", "content": prompt}], **kwargs)
-    return response.message.strip()
+    tool_calls = getattr(response, "tool_calls", []) or []
+    if tool_calls:
+        tool_names = ",".join(
+            str(getattr(tc, "name", "")) for tc in tool_calls if getattr(tc, "name", "")
+        ) or "-"
+        logger.info(
+            "LLM caller=%s model=%s finish_reason=%s tool_calls=%d tools=%s",
+            kwargs.get("caller", "?"),
+            kwargs.get("model") or "(default)",
+            getattr(response, "finish_reason", "unknown"),
+            len(tool_calls),
+            tool_names,
+        )
+    else:
+        logger.debug(
+            "LLM caller=%s model=%s finish_reason=%s tool_calls=0",
+            kwargs.get("caller", "?"),
+            kwargs.get("model") or "(default)",
+            getattr(response, "finish_reason", "unknown"),
+        )
+    return _strip_reasoning_blocks(response.message or "")
 
 
 def multi_generate(
@@ -62,15 +107,17 @@ def multi_generate(
     prompt: str,
     context: str = "",
     model: str = "",
+    context_by_identity: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Generate text for each identity. Returns {identity.name → text}.
 
     model="" → each identity uses its own model field.
     """
-    return {
-        identity.name: generate_with_identity(ctx, identity, prompt, context, model)
-        for identity in identities
-    }
+    outputs: dict[str, str] = {}
+    for identity in identities:
+        use_context = context_by_identity.get(identity.name, context) if context_by_identity else context
+        outputs[identity.name] = generate_with_identity(ctx, identity, prompt, use_context, model)
+    return outputs
 
 
 def _generate_ranking(
@@ -79,6 +126,7 @@ def _generate_ranking(
     candidates: dict[str, str],
     prompt: str,
     model: str = "",
+    vote_context: str = "",
 ) -> list[str]:
     """Ask a voter to rank candidates. Returns ordered list of candidate names."""
     candidate_ids = list(candidates.keys())
@@ -91,8 +139,10 @@ def _generate_ranking(
         f"You are {voter.name}. Personality: {persona}\n"
         "Rank the candidate replies by how well they address the conversation."
     )
+    context_block = f"\nShared context:\n{vote_context}\n\n" if vote_context else ""
     user_msg = (
         f"Conversation:\n{prompt}\n\n"
+        f"{context_block}"
         f"Candidates:\n{options}\n\n"
         f'Return JSON: {{"ranking": ["id1", "id2", ...]}}'
     )
@@ -115,6 +165,26 @@ def _generate_ranking(
         kwargs["provider"] = use_provider
 
     response = ctx.llm([{"role": "user", "content": user_msg}], **kwargs)
+    tool_calls = getattr(response, "tool_calls", []) or []
+    if tool_calls:
+        tool_names = ",".join(
+            str(getattr(tc, "name", "")) for tc in tool_calls if getattr(tc, "name", "")
+        ) or "-"
+        logger.info(
+            "LLM caller=%s model=%s finish_reason=%s tool_calls=%d tools=%s",
+            kwargs.get("caller", "?"),
+            kwargs.get("model") or "(default)",
+            getattr(response, "finish_reason", "unknown"),
+            len(tool_calls),
+            tool_names,
+        )
+    else:
+        logger.debug(
+            "LLM caller=%s model=%s finish_reason=%s tool_calls=0",
+            kwargs.get("caller", "?"),
+            kwargs.get("model") or "(default)",
+            getattr(response, "finish_reason", "unknown"),
+        )
 
     try:
         raw = response.message.strip()
@@ -141,6 +211,8 @@ def multi_vote(
     model: str = "",
     exclude_own: bool = False,
     top_n: int = 0,
+    vote_context: str = "",
+    vote_context_by_identity: dict[str, str] | None = None,
 ) -> dict[str, list[str]]:
     """Have each identity rank candidates. Returns {voter.name → ranked candidate names}.
 
@@ -161,7 +233,19 @@ def multi_vote(
         if len(voter_candidates) == 1:
             ranking = list(voter_candidates.keys())
         else:
-            ranking = _generate_ranking(ctx, voter, voter_candidates, prompt, model)
+            use_vote_context = (
+                vote_context_by_identity.get(voter.name, vote_context)
+                if vote_context_by_identity
+                else vote_context
+            )
+            ranking = _generate_ranking(
+                ctx,
+                voter,
+                voter_candidates,
+                prompt,
+                model,
+                use_vote_context,
+            )
 
         if top_n > 0:
             ranking = ranking[:top_n]
@@ -175,11 +259,14 @@ def deliberate(
     identities: list[Identity],
     prompt: str,
     context: str = "",
+    context_by_identity: dict[str, str] | None = None,
     subset: list[Identity] | None = None,
     model: str = "",
     exclude_own: bool = False,
     top_n: int = 0,
     consensus_threshold: float = 0.6,
+    vote_context: str = "",
+    vote_context_by_identity: dict[str, str] | None = None,
 ) -> dict:
     """Full deliberation: generate candidates, vote, tally.
 
@@ -188,7 +275,7 @@ def deliberate(
              is_tie, has_consensus, candidates dict, votes dict.
     """
     generators = subset if subset is not None else identities
-    candidates = multi_generate(ctx, generators, prompt, context, model)
+    candidates = multi_generate(ctx, generators, prompt, context, model, context_by_identity)
 
     if not candidates:
         return {
@@ -203,7 +290,17 @@ def deliberate(
             "votes": {},
         }
 
-    votes = multi_vote(ctx, identities, candidates, prompt, model, exclude_own, top_n)
+    votes = multi_vote(
+        ctx,
+        identities,
+        candidates,
+        prompt,
+        model,
+        exclude_own,
+        top_n,
+        vote_context,
+        vote_context_by_identity,
+    )
     tally = borda_tally(candidates, votes)
 
     winner_id = tally["winner_member"]
@@ -231,6 +328,7 @@ def recompose(
     all_candidates: dict[str, str] | None = None,
     context: str = "",
     model: str = "",
+    max_tokens: int = 512,
 ) -> str:
     """Rewrite winning text through identity's voice.
 
@@ -247,7 +345,14 @@ def recompose(
     else:
         prompt = f"Rewrite this response in your own voice and style:\n\n{winning_text}"
 
-    return generate_with_identity(ctx, identity, prompt, context, model)
+    return generate_with_identity(
+        ctx,
+        identity,
+        prompt,
+        context,
+        model,
+        max_tokens=max_tokens,
+    )
 
 
 def think_with_context(
@@ -269,18 +374,30 @@ def think_with_context(
 
     if voice_memory:
         if voice_memory.get("subconscious"):
-            parts.append(f"## Subconscious\n{voice_memory['subconscious']}")
+            parts.append(f"## Your Subconscious\n{voice_memory['subconscious']}")
         if voice_memory.get("motivation"):
-            parts.append(f"## Motivation\n{voice_memory['motivation']}")
+            parts.append(f"## Your Motivation\n{voice_memory['motivation']}")
         if voice_memory.get("thinking"):
-            parts.append(f"## Previous Thoughts\n{voice_memory['thinking']}")
+            parts.append(f"## Your Previous Thoughts\n{voice_memory['thinking']}")
 
     full_context = "\n\n".join(parts)
 
     others_block = ""
     if others_thinking:
         lines = [f"**{name}**: {thought}" for name, thought in others_thinking.items()]
-        others_block = "\n\n## Other voices' thoughts\n" + "\n\n".join(lines)
+        others_block = (
+            "\n\n## Other voices' thoughts (not yours)\n"
+            "Treat these as advisory input from the other two voices.\n\n"
+            + "\n\n".join(lines)
+        )
 
-    prompt = f"Reflect and think freely.{others_block}\n\nWrite your current thoughts."
+    prompt = (
+        f"You are {identity.name}, one of three internal voices guiding and directing the same entity.\n"
+        "Guidance:\n"
+        "- Treat sections labeled 'Your ...' as your own memory and commitments.\n"
+        "- Treat 'Other voices' content as someone else's perspective, not your own memory.\n"
+        "- Think from your own perspective while coordinating with the other two voices.\n"
+        f"{others_block}\n\n"
+        "Write your current thoughts for this iteration."
+    )
     return generate_with_identity(ctx, identity, prompt, full_context, "")

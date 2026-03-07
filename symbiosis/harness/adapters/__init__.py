@@ -30,3 +30,7 @@ class MessagingAdapter(ABC):
     def get_space_context(self, space_handle: str) -> dict:
         """Return name, topic, members for composing context blocks."""
         ...
+
+    def get_entity_id(self) -> str | None:
+        """Optional: return adapter-authenticated entity/user ID for self-message filtering."""
+        return None

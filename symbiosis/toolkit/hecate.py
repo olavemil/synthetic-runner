@@ -103,6 +103,38 @@ def _build_memory_context(shared_memory: dict[str, str], voice_memory: dict[str,
     return "\n\n".join(parts)
 
 
+def build_memory_snapshot_context(ctx: InstanceContext, voices: list[Identity]) -> str:
+    """Render a pre-iteration snapshot of memory directory files."""
+    paths: list[str] = []
+    if hasattr(ctx, "list"):
+        try:
+            paths = sorted(p for p in ctx.list("") if p.endswith(".md"))
+        except Exception:
+            paths = []
+
+    if not paths:
+        fallback = ["memory.md", "constitution.md"]
+        for voice in voices:
+            base = voice.name.lower()
+            fallback.extend(
+                [f"{base}_thinking.md", f"{base}_subconscious.md", f"{base}_motivation.md"]
+            )
+        # Keep order, remove duplicates.
+        seen = set()
+        for path in fallback:
+            if path not in seen:
+                seen.add(path)
+                paths.append(path)
+
+    parts = ["## Memory Directory Snapshot (before iteration)"]
+    for path in paths:
+        content = ctx.read(path)
+        if not content:
+            continue
+        parts.append(f"### {path}\n{content}")
+    return "\n\n".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Voice operations
 # ---------------------------------------------------------------------------

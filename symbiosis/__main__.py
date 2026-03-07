@@ -22,6 +22,15 @@ _INSTANCE_TEMPLATE_STEMS = {"example", "sample", "template"}
 _KNOWN_COMMANDS = {"run", "setup", "check", "work", "tick", "schedule", "-h", "--help"}
 
 
+class _MaxLevelFilter(logging.Filter):
+    def __init__(self, max_level: int):
+        super().__init__()
+        self._max_level = max_level
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno <= self._max_level
+
+
 def load_species(species_id: str):
     """Load a species by ID. Returns a Species instance."""
     import symbiosis.species as species_pkg
@@ -64,10 +73,18 @@ def _configure_logging(level_name: str, log_file: str | None) -> None:
 
     root = logging.getLogger()
     root.setLevel(level)
+    root.handlers.clear()
 
-    stream = logging.StreamHandler()
-    stream.setFormatter(fmt)
-    root.addHandler(stream)
+    stdout_handler = logging.StreamHandler(stream=sys.stdout)
+    stdout_handler.setLevel(level)
+    stdout_handler.addFilter(_MaxLevelFilter(logging.WARNING))
+    stdout_handler.setFormatter(fmt)
+    root.addHandler(stdout_handler)
+
+    stderr_handler = logging.StreamHandler(stream=sys.stderr)
+    stderr_handler.setLevel(logging.ERROR)
+    stderr_handler.setFormatter(fmt)
+    root.addHandler(stderr_handler)
 
     if log_file:
         log_path = Path(log_file)

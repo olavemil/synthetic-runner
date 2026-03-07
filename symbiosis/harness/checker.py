@@ -8,6 +8,7 @@ from pathlib import Path
 
 from croniter import croniter
 
+from symbiosis.harness.adapters import Event
 from symbiosis.harness.config import HarnessConfig, InstanceConfig, load_harness_config, load_instance_config
 from symbiosis.harness.jobqueue import JobQueue
 from symbiosis.harness.registry import Registry
@@ -53,6 +54,8 @@ class Checker:
         self._base_dir = base_dir
         self._queue = JobQueue(store_db)
         self._instance_adapters: dict[str, object] = {}
+        self._resolved_entity_ids: dict[str, str | None] = {}
+        self._warned_missing_entity_id: set[str] = set()
 
     # ------------------------------------------------------------------
     # Public
@@ -60,29 +63,57 @@ class Checker:
 
     def run(self) -> None:
         """Execute one check cycle: poll adapters + check schedules."""
+        instances = self._registry.list_instances()
+        logger.info("Checker cycle started (instances=%d)", len(instances))
+        # Enqueue due scheduled jobs first so heartbeat-like tasks are not
+        # indefinitely starved by frequent on_message enqueues.
+        scheduled_instances: set[str] = self._check_schedules(set())
         reactive_instances: set[str] = set()
 
-        for instance_config in self._registry.list_instances():
-            if self._poll_instance(instance_config):
+        for instance_config in instances:
+            got_messages, enqueued = self._poll_instance(instance_config)
+            if got_messages:
                 reactive_instances.add(instance_config.instance_id)
+            if enqueued:
+                scheduled_instances.add(instance_config.instance_id)
 
-        self._check_schedules(reactive_instances)
+        # Run schedule pass again after polling to keep idle counters aligned
+        # with this cycle's reactive activity and to catch any entry points that
+        # became due during long polling loops.
+        scheduled_instances.update(self._check_schedules(reactive_instances))
+        logger.info("Checker cycle finished (scheduled_instances=%d)", len(scheduled_instances))
 
     # ------------------------------------------------------------------
     # Reactive polling
     # ------------------------------------------------------------------
 
-    def _poll_instance(self, instance_config: InstanceConfig) -> bool:
-        """Poll all spaces for an instance. Returns True if new events found."""
+    @staticmethod
+    def _serialize_events(events: list[Event]) -> list[dict]:
+        return [
+            {
+                "event_id": e.event_id,
+                "sender": e.sender,
+                "body": e.body,
+                "timestamp": e.timestamp,
+                "room": e.room,
+            }
+            for e in events
+        ]
+
+    def _poll_instance(self, instance_config: InstanceConfig) -> tuple[bool, bool]:
+        """Poll all spaces for an instance. Returns (got_messages, enqueued_job)."""
         if not instance_config.messaging:
-            return False
+            return False, False
 
         instance_id = instance_config.instance_id
         adapter = self._get_adapter(instance_config)
         if adapter is None:
-            return False
+            return False, False
+        entity_id = self._resolve_entity_id(instance_config, adapter)
 
         got_messages = False
+        enqueued = False
+        pending_events: list[Event] = []
 
         for space_mapping in instance_config.messaging.spaces:
             space_name = space_mapping.name
@@ -92,32 +123,129 @@ class Checker:
 
             try:
                 events, next_token = adapter.poll(handle, token)
+                normalized_events = [
+                    type(evt)(
+                        event_id=evt.event_id,
+                        sender=evt.sender,
+                        body=evt.body,
+                        timestamp=evt.timestamp,
+                        room=space_name,
+                    )
+                    for evt in events
+                ]
                 self._store.put(token_key, next_token)
 
-                if events and token is not None:
+                if normalized_events and token is None:
+                    logger.info(
+                        "Initial sync %s/%s received events=%d; skipping enqueue until next poll",
+                        instance_id,
+                        space_name,
+                        len(normalized_events),
+                    )
+
+                if normalized_events and token is not None:
+                    if not entity_id:
+                        logger.warning(
+                            "Skipping reactive events for %s/%s: entity_id is unknown "
+                            "(configure messaging.entity_id or use adapter identity lookup)",
+                            instance_id,
+                            space_name,
+                        )
+                        continue
                     # Filter out own events
-                    entity_id = instance_config.messaging.entity_id
-                    own_events = [e for e in events if e.sender != entity_id]
-                    if own_events:
+                    external_events = [e for e in normalized_events if e.sender != entity_id]
+                    filtered_self = len(normalized_events) - len(external_events)
+                    if external_events:
                         got_messages = True
+                        pending_events.extend(external_events)
+                    else:
+                        logger.info(
+                            "No external events for %s/%s (events=%d filtered_self=%d)",
+                            instance_id,
+                            space_name,
+                            len(normalized_events),
+                            filtered_self,
+                        )
             except Exception:
                 logger.exception("Error polling %s/%s", instance_id, space_name)
 
-        if got_messages and not self._queue.has_active(instance_id):
-            job_id = self._queue.enqueue(instance_id, "on_message", {})
-            if job_id:
-                logger.info("Enqueued on_message for %s (job %s)", instance_id, job_id)
-            # Reset idle count on new messages
-            self._store.put(f"idle:{instance_id}", 0)
+        if got_messages:
+            counter_key = f"external_count:{instance_id}"
+            try:
+                prior_count = int(self._store.get(counter_key) or 0)
+            except (TypeError, ValueError):
+                prior_count = 0
+            new_count = prior_count + len(pending_events)
+            self._store.put(counter_key, new_count)
+            logger.info(
+                "Recorded external messages for %s (delta=%d total=%d)",
+                instance_id,
+                len(pending_events),
+                new_count,
+            )
+            if not self._queue.has_active(instance_id):
+                payload = {"events": self._serialize_events(pending_events)}
+                job_id = self._queue.enqueue(instance_id, "on_message", payload)
+                if job_id:
+                    logger.info(
+                        "Enqueued on_message for %s (job %s, events=%d)",
+                        instance_id,
+                        job_id,
+                        len(pending_events),
+                    )
+                    enqueued = True
+                # Reset idle count on new messages
+                self._store.put(f"idle:{instance_id}", 0)
+            else:
+                logger.info("Skipping on_message enqueue for %s; active job already exists", instance_id)
 
-        return got_messages
+        return got_messages, enqueued
+
+    def _resolve_entity_id(self, instance_config: InstanceConfig, adapter) -> str:
+        """Resolve sender identity used to filter out self-generated events."""
+        instance_id = instance_config.instance_id
+        messaging = instance_config.messaging
+        if messaging is None:
+            return ""
+
+        configured = (messaging.entity_id or "").strip()
+        if configured:
+            self._resolved_entity_ids[instance_id] = configured
+            return configured
+
+        if instance_id in self._resolved_entity_ids:
+            return self._resolved_entity_ids[instance_id] or ""
+
+        resolved = ""
+        lookup = getattr(adapter, "get_entity_id", None)
+        if callable(lookup):
+            try:
+                resolved = str(lookup() or "").strip()
+            except Exception:
+                logger.exception("Failed adapter entity_id lookup for %s", instance_id)
+
+        if resolved:
+            self._resolved_entity_ids[instance_id] = resolved
+            logger.info("Resolved entity_id for %s via adapter lookup: %s", instance_id, resolved)
+            return resolved
+
+        self._resolved_entity_ids[instance_id] = None
+        if instance_id not in self._warned_missing_entity_id:
+            logger.warning(
+                "No entity_id configured for %s and adapter lookup failed; "
+                "reactive events will be skipped to avoid self-trigger loops",
+                instance_id,
+            )
+            self._warned_missing_entity_id.add(instance_id)
+        return ""
 
     # ------------------------------------------------------------------
     # Schedule checking
     # ------------------------------------------------------------------
 
-    def _check_schedules(self, reactive_instances: set[str]) -> None:
+    def _check_schedules(self, reactive_instances: set[str]) -> set[str]:
         now = time.time()
+        scheduled_instances: set[str] = set()
 
         for instance_config in self._registry.list_instances():
             instance_id = instance_config.instance_id
@@ -175,11 +303,14 @@ class Checker:
                         logger.info(
                             "Enqueued %s.%s (job %s)", instance_id, ep_name, job_id
                         )
+                        scheduled_instances.add(instance_id)
                 else:
                     logger.debug(
                         "Skipping %s.%s — instance already has active job",
                         instance_id, ep_name,
                     )
+
+        return scheduled_instances
 
     # ------------------------------------------------------------------
     # Adapter management

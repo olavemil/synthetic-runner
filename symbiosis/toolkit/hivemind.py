@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import random
+import re
 import time
 import uuid
+from urllib.parse import quote
 from typing import TYPE_CHECKING
 
 from symbiosis.toolkit.identity import (
@@ -17,6 +20,7 @@ from symbiosis.toolkit.identity import (
 )
 from symbiosis.toolkit.voting import approval_weights, weighted_sample
 from symbiosis.toolkit.deliberate import generate_with_identity
+from symbiosis.toolkit.prompts import format_events
 
 if TYPE_CHECKING:
     from symbiosis.harness.context import InstanceContext
@@ -25,6 +29,104 @@ if TYPE_CHECKING:
 Individual = Identity
 
 COLONY_NAMESPACE = "colony"
+logger = logging.getLogger(__name__)
+_THINK_TAG_RE = re.compile(
+    r"(?is)<\s*(think|thinking|analysis|reasoning)\b[^>]*>.*?<\s*/\s*\1\s*>"
+)
+_THINK_FENCE_RE = re.compile(
+    r"(?is)```(?:\s*(?:think|thinking|analysis|reasoning)[^\n]*)\n.*?```"
+)
+_THINK_LINE_RE = re.compile(
+    r"(?im)^\s*<\s*(?:think|thinking|analysis|reasoning)\b[^>]*>.*$"
+)
+_THINK_SINGLE_TAG_RE = re.compile(
+    r"(?is)</?\s*(?:think|thinking|analysis|reasoning)\b[^>]*>"
+)
+_CODE_FENCE_RE = re.compile(r"(?is)```(?:[a-zA-Z0-9_-]+)?\n(.*?)```")
+_WORD_RE = re.compile(r"\b\w+\b")
+
+
+def _word_count(text: str) -> int:
+    return len(_WORD_RE.findall(text or ""))
+
+
+def _strip_reasoning_blocks(text: str) -> str:
+    cleaned = _THINK_TAG_RE.sub(" ", text or "")
+    cleaned = _THINK_FENCE_RE.sub(" ", cleaned)
+    cleaned = _THINK_LINE_RE.sub(" ", cleaned)
+    cleaned = _THINK_SINGLE_TAG_RE.sub(" ", cleaned)
+    # Keep fenced content when it's not explicitly a thinking block.
+    cleaned = _CODE_FENCE_RE.sub(lambda m: m.group(1), cleaned)
+    return cleaned
+
+
+def _extract_first_sentence(text: str) -> str:
+    match = re.search(r"[.!?](?:\s|$)", text)
+    if match:
+        return text[: match.end()].strip()
+    return text.strip()
+
+
+def _sanitize_contribution(text: str, max_chars: int = 220) -> str:
+    cleaned = _strip_reasoning_blocks(text).replace("\r\n", "\n")
+    lines = []
+    for raw_line in cleaned.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        line = re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", line)
+        if re.match(r"^(analysis|reasoning|thoughts?|thinking)\s*:", line, flags=re.IGNORECASE):
+            continue
+        lines.append(line)
+
+    merged = " ".join(lines)
+    merged = re.sub(r"(?i)^(?:principle|refinement|proposal)\s*:\s*", "", merged).strip()
+    merged = re.sub(r"\s+", " ", merged)
+    if not merged:
+        return ""
+
+    one_sentence = _extract_first_sentence(merged)
+    if len(one_sentence) > max_chars:
+        one_sentence = one_sentence[:max_chars].rstrip()
+    return one_sentence
+
+
+def _truncate_to_words(text: str, max_words: int) -> str:
+    if _word_count(text) <= max_words:
+        return text.strip()
+    return " ".join((text or "").split()[:max_words]).strip()
+
+
+def _truncate_for_prompt(text: str, max_chars: int) -> str:
+    cleaned = (text or "").strip()
+    if len(cleaned) <= max_chars:
+        return cleaned
+    clipped = cleaned[:max_chars].rsplit(" ", 1)[0].rstrip()
+    if not clipped:
+        clipped = cleaned[:max_chars].rstrip()
+    return f"{clipped}\n...[truncated]"
+
+
+def _sanitize_constitution_candidate(text: str, max_words: int) -> str:
+    cleaned = _strip_reasoning_blocks(text).replace("\r\n", "\n").strip()
+    if not cleaned:
+        return ""
+
+    cleaned = re.sub(
+        r"(?is)^\s*(?:here(?:'s| is)\s+(?:the|a)\s+(?:rewritten|revised)\s+constitution\s*:?)\s*",
+        "",
+        cleaned,
+    )
+
+    lower = cleaned.lower()
+    for marker in ("# constitution", "constitution:"):
+        idx = lower.find(marker)
+        if idx > 0 and idx <= max(240, len(cleaned) // 2):
+            cleaned = cleaned[idx:].strip()
+            break
+
+    cleaned = _truncate_to_words(cleaned, max_words=max_words)
+    return cleaned
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +227,140 @@ def save_colony(ctx: InstanceContext, colony: list[Identity]) -> None:
         store.put(ind.name, _identity_to_dict(ind))
 
 
+def _md_escape(text: str) -> str:
+    return text.replace("|", "\\|").replace("\n", " ")
+
+
+def build_colony_snapshot(colony: list[Identity]) -> str:
+    """Render a human-readable colony snapshot markdown document."""
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+    lines = [
+        "# Colony",
+        "",
+        f"Generated: {timestamp}",
+        f"Individuals: {len(colony)}",
+        "",
+        "| Individual | Personality | Approval |",
+        "| --- | --- | ---: |",
+    ]
+
+    if not colony:
+        lines.append("| - | - | 0 |")
+        return "\n".join(lines) + "\n"
+
+    for ind in sorted(colony, key=lambda i: (-i.approval, i.created_at, i.name)):
+        personality = _md_escape(format_persona(ind))
+        lines.append(f"| `{ind.name}` | {personality} | {ind.approval} |")
+
+    return "\n".join(lines) + "\n"
+
+
+def save_colony_snapshot(ctx: InstanceContext, colony: list[Identity]) -> None:
+    """Write colony.md snapshot to instance memory storage."""
+    content = build_colony_snapshot(colony)
+    logger.info(
+        "Writing thrivemind colony.md (individuals=%d, chars=%d)",
+        len(colony),
+        len(content),
+    )
+    ctx.write("colony.md", content)
+
+
+def _reflection_path(individual: Identity | str) -> str:
+    name = individual.name if isinstance(individual, Identity) else str(individual)
+    return f"reflections/{quote(name, safe='-_.,')}.md"
+
+
+def load_reflection(ctx: InstanceContext, individual: Identity) -> str:
+    return ctx.read(_reflection_path(individual))
+
+
+def save_reflection(ctx: InstanceContext, individual: Identity, text: str) -> None:
+    path = _reflection_path(individual)
+    logger.info(
+        "Writing thrivemind %s (individual=%s, chars=%d)",
+        path,
+        individual.name,
+        len(text or ""),
+    )
+    ctx.write(path, text)
+
+
+def summarize_message_history(
+    ctx: InstanceContext,
+    events: list,
+    cfg: ThrivemindConfig,
+) -> str:
+    """Summarize current message history once for a shared colony context."""
+    if not events:
+        return ""
+
+    provider, model = parse_model(cfg.suggestion_model) if cfg.suggestion_model else (None, "")
+    summarizer = Identity(
+        name="ColonySummarizer",
+        model=model,
+        provider=provider,
+        personality="Concise colony historian focused on decision-relevant context.",
+    )
+    prompt = (
+        "Summarize this message history for colony decision-making.\n"
+        "Keep it brief (4-8 bullet points), factual, and focused on stakes and requests.\n\n"
+        f"{format_events(events)}"
+    )
+    summary = generate_with_identity(ctx, summarizer, prompt, model=cfg.suggestion_model).strip()
+    logger.info("Generated thrivemind message summary (chars=%d)", len(summary))
+    return summary
+
+
+def build_reflection_context(
+    colony_md: str,
+    constitution: str,
+    prior_reflection: str,
+    message_summary: str,
+) -> str:
+    parts = []
+    if colony_md:
+        parts.append(f"## Colony\n{colony_md}")
+    if constitution:
+        parts.append(f"## Constitution\n{constitution}")
+    if prior_reflection:
+        parts.append(f"## Prior Reflection\n{prior_reflection}")
+    if message_summary:
+        parts.append(f"## Message Summary\n{message_summary}")
+    return "\n\n".join(parts)
+
+
+def reflect_on_colony(
+    ctx: InstanceContext,
+    cfg: ThrivemindConfig,
+    individual: Identity,
+    colony: list[Identity],
+    constitution: str,
+    prior_reflection: str,
+    message_summary: str,
+) -> str:
+    colony_md = ctx.read("colony.md") or build_colony_snapshot(colony)
+    context = build_reflection_context(
+        colony_md=colony_md,
+        constitution=constitution,
+        prior_reflection=prior_reflection,
+        message_summary=message_summary,
+    )
+    reflection = generate_with_identity(
+        ctx,
+        individual,
+        "This is your moment to reflect on the state of your colony.",
+        context=context,
+        model=cfg.suggestion_model,
+    ).strip()
+    logger.info(
+        "Generated thrivemind reflection (individual=%s, chars=%d)",
+        individual.name,
+        len(reflection),
+    )
+    return reflection
+
+
 def spawn_initial_colony(
     cfg: ThrivemindConfig, rng: random.Random | None = None
 ) -> list[Identity]:
@@ -163,20 +399,76 @@ def contribute_constitution_line(
     individual: Identity,
     current_constitution: str,
     cfg: ThrivemindConfig,
+    reflections: str = "",
 ) -> str:
     persona = format_persona(individual)
+    constitution_excerpt = _truncate_for_prompt(current_constitution, max_chars=2400)
+    reflections_excerpt = _truncate_for_prompt(reflections, max_chars=900)
+    reflections_block = f"\n\nReflections:\n{reflections_excerpt}" if reflections_excerpt else ""
     prompt = (
-        f"Personality: {persona}\n\n"
-        f"Current constitution:\n{current_constitution}\n\n"
-        "Propose one new principle or refinement (one sentence)."
+        f"You are {individual.name}, one individual in a colony that is collectively drafting a constitution to guide its future decisions and values.\n"
+        f"Your personality: {persona}\n\n"
+        f"Current constitution:\n{constitution_excerpt}\n\n"
+        f"{reflections_block}"
+        "Propose exactly one new principle or refinement.\n"
+        "Constraints:\n"
+        "- Keep this limited to 1 line.\n"
+        "- Maximum 18 words.\n"
+        "- One sentence only.\n"
+        "- Start directly with the principle text.\n"
+        "- No analysis or meta commentary.\n"
+        "Return only the principle sentence."
     )
-    return generate_with_identity(
+    raw = generate_with_identity(
         ctx,
         individual,
         prompt,
-        context="You are contributing one principle or value to your colony's shared constitution.",
+        context=(
+            "You are contributing one principle or value to your colony's shared constitution.\n"
+            "Keep it concise and practical.\n"
+            "Your first character should be the principle sentence."
+        ),
         model=cfg.suggestion_model,
+        max_tokens=512,
     )
+    line = _sanitize_contribution(raw, max_chars=220)
+    if not line:
+        retry_prompt = (
+            f"You are {individual.name}, one individual in a colony that is collectively drafting a constitution to guide its future decisions and values.\n"
+            f"Your personality: {persona}\n\n"
+            "Your previous response was invalid.\n"
+            "Return exactly one plain sentence proposing one principle.\n"
+            "Constraints:\n"
+            "- Maximum 18 words.\n"
+            "- One sentence only.\n"
+            "- Start directly with the sentence.\n"
+            "- No labels or commentary.\n"
+            "Return only the sentence."
+        )
+        retry_raw = generate_with_identity(
+            ctx,
+            individual,
+            retry_prompt,
+            context="Final-answer mode.",
+            model=cfg.suggestion_model,
+            max_tokens=256,
+        )
+        retry_line = _sanitize_contribution(retry_raw, max_chars=220)
+        if retry_line:
+            logger.info(
+                "Recovered constitution contribution after empty sanitized output (individual=%s, retry_chars=%d)",
+                individual.name,
+                len(retry_line),
+            )
+            line = retry_line
+    if line != (raw or "").strip():
+        logger.info(
+            "Sanitized constitution contribution output (individual=%s, raw_chars=%d, final_chars=%d)",
+            individual.name,
+            len(raw or ""),
+            len(line),
+        )
+    return line
 
 
 def rewrite_constitution(
@@ -186,6 +478,14 @@ def rewrite_constitution(
     cfg: ThrivemindConfig,
 ) -> str:
     combined = "\n".join(f"- {line}" for line in lines if line.strip())
+    constitution_excerpt = _truncate_for_prompt(current_constitution, max_chars=5000)
+    combined_excerpt = _truncate_for_prompt(combined, max_chars=2600)
+    input_word_count = _word_count(current_constitution) + _word_count(combined)
+    target_words = max(20, min(220, input_word_count))
+    min_words = max(12, int(target_words * 0.7))
+    max_words = max(min_words + 8, int(target_words * 1.3))
+    rewrite_max_tokens = max(256, min(1024, max_words * 4))
+
     # Use a writer identity with the writer model
     provider, model = parse_model(cfg.writer_model) if cfg.writer_model else (None, "")
     writer = Identity(
@@ -195,11 +495,57 @@ def rewrite_constitution(
         personality="You are synthesizing colony principles into a coherent constitution.",
     )
     prompt = (
-        f"Current constitution:\n{current_constitution}\n\n"
-        f"Proposed principles:\n{combined}\n\n"
-        "Rewrite the constitution incorporating the best principles. Keep it concise."
+        f"Current constitution:\n{constitution_excerpt}\n\n"
+        f"Proposed principles:\n{combined_excerpt}\n\n"
+        "Rewrite the constitution by integrating the strongest principles into a cohesive candidate.\n"
+        "Constraints:\n"
+        "- Output only the final constitution text.\n"
+        "- Start directly with the constitution, no preface.\n"
+        "- Do not include thinking, analysis, or meta commentary.\n"
+        f"- Keep length similar to input (target ~{target_words} words, acceptable range {min_words}-{max_words}).\n"
+        "- Keep concise headings/bullets if useful, but avoid repetition."
     )
-    return generate_with_identity(ctx, writer, prompt, model=cfg.writer_model)
+    raw = generate_with_identity(
+        ctx,
+        writer,
+        prompt,
+        model=cfg.writer_model,
+        max_tokens=rewrite_max_tokens,
+    )
+    rewritten = _sanitize_constitution_candidate(raw, max_words=max_words)
+    if not rewritten:
+        retry_prompt = (
+            f"Current constitution:\n{constitution_excerpt}\n\n"
+            f"Proposed principles:\n{combined_excerpt}\n\n"
+            "Your previous output was invalid.\n"
+            "Return only a cohesive constitution draft now.\n"
+            "No preface and no meta commentary."
+        )
+        retry_raw = generate_with_identity(
+            ctx,
+            writer,
+            retry_prompt,
+            model=cfg.writer_model,
+            max_tokens=rewrite_max_tokens,
+        )
+        retry_rewritten = _sanitize_constitution_candidate(retry_raw, max_words=max_words)
+        if retry_rewritten:
+            logger.info(
+                "Recovered constitution candidate after empty sanitized output (final_chars=%d)",
+                len(retry_rewritten),
+            )
+            rewritten = retry_rewritten
+    if rewritten != (raw or "").strip():
+        logger.info(
+            "Sanitized constitution candidate output (raw_chars=%d, final_chars=%d)",
+            len(raw or ""),
+            len(rewritten),
+        )
+    if rewritten:
+        return rewritten
+    fallback = current_constitution.strip() or "# Constitution\n"
+    logger.warning("Constitution rewrite became empty after sanitization; falling back to current constitution")
+    return fallback
 
 
 def vote_constitution(
@@ -208,14 +554,29 @@ def vote_constitution(
     current: str,
     proposed: str,
     cfg: ThrivemindConfig,
+    reflections: str = "",
+    round_context: str = "",
 ) -> bool:
     persona = format_persona(individual)
-    prompt = (
+    current_excerpt = _truncate_for_prompt(current, max_chars=3200)
+    proposed_excerpt = _truncate_for_prompt(proposed, max_chars=3200)
+    reflections_excerpt = _truncate_for_prompt(reflections, max_chars=1000)
+    reflections_block = f"\n\nReflections:\n{reflections_excerpt}" if reflections_excerpt else ""
+    prompt_parts = [
+        f"You are {individual.name}, one individual in a colony that is collectively voting on whether to adopt a proposed constitution that will guide its future decisions and values.\n"
         f"Personality: {persona}\n\n"
-        f"Current:\n{current}\n\n"
-        f"Proposed:\n{proposed}\n\n"
+        f"Current:\n{current_excerpt}\n\n"
+        f"Proposed:\n{proposed_excerpt}\n\n"
+        f"{reflections_block}"
+        "Stakes: individuals who vote with the ultimately winning direction gain approval; "
+        "individuals who back the losing direction lose approval.\n"
+        "Vote strategically for the colony's long-term survival.\n\n"
         'Reply with JSON: {"accept": true} or {"accept": false}'
-    )
+    ]
+    if round_context.strip():
+        round_context_excerpt = _truncate_for_prompt(round_context.strip(), max_chars=1400)
+        prompt_parts.append(f"\n\nAdditional context:\n{round_context_excerpt}")
+    prompt = "".join(prompt_parts)
     raw = generate_with_identity(
         ctx,
         individual,
@@ -233,11 +594,53 @@ def vote_constitution(
 
 
 def save_constitution(ctx: InstanceContext, text: str) -> None:
+    logger.info(
+        "Writing thrivemind constitution.md (chars=%d)",
+        len(text or ""),
+    )
     ctx.write("constitution.md", text)
 
 
+def build_contributions_snapshot(lines: list[str]) -> str:
+    """Render the raw constitution contributions for visibility."""
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+    out = [
+        "# Contributions",
+        "",
+        f"Generated: {timestamp}",
+        f"Count: {len(lines)}",
+        "",
+    ]
+    if not lines:
+        out.append("(no contributions)")
+    else:
+        for idx, line in enumerate(lines, start=1):
+            out.append(f"{idx}. {line}")
+    out.append("")
+    return "\n".join(out)
+
+
+def save_contributions(ctx: InstanceContext, lines: list[str]) -> None:
+    content = build_contributions_snapshot(lines)
+    logger.info(
+        "Writing thrivemind contributions.md (count=%d, chars=%d)",
+        len(lines),
+        len(content),
+    )
+    ctx.write("contributions.md", content)
+
+
+def save_candidate(ctx: InstanceContext, candidate: str) -> None:
+    logger.info("Writing thrivemind candidate.md (chars=%d)", len(candidate or ""))
+    ctx.write("candidate.md", candidate)
+
+
 def load_constitution(ctx: InstanceContext) -> str:
-    return ctx.read("constitution.md") or "# Constitution\n"
+    existing = ctx.read("constitution.md")
+    if existing:
+        return existing
+    logger.info("No thrivemind constitution.md found; using default scaffold")
+    return "# Constitution\n"
 
 
 # ---------------------------------------------------------------------------

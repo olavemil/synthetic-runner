@@ -171,6 +171,19 @@ def compose_response(
         if room_context.get("members"):
             context_parts.append(f"Members: {', '.join(room_context['members'])}")
 
+    intro_instruction = ""
+    species_id = getattr(ctx, "species_id", "")
+    if species_id == "draum":
+        intro_instruction = (
+            "\nInclude a clear self-identification as Draum "
+            "(for example \"This is Draum\") near the start, but phrasing does not need to be verbatim."
+        )
+    elif species_id:
+        intro_instruction = (
+            f"\nInclude a clear self-identification as {species_id} "
+            f"(for example \"This is {species_id}\") near the start, but phrasing does not need to be verbatim."
+        )
+
     user_msg = f"""## Guidance
 {json.dumps(guidance, indent=2)}
 
@@ -181,7 +194,8 @@ def compose_response(
 ## Memory
 {memory_context}
 
-Compose the message. Output only the message text, nothing else. If you decide not to respond, output exactly: NULL"""
+Compose the message.{intro_instruction}
+Output only the message text, nothing else. If you decide not to respond, output exactly: NULL"""
 
     response = ctx.llm(
         messages=[{"role": "user", "content": user_msg}],

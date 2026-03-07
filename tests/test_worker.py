@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import MagicMock, call, patch
 
 import pytest
 
+from symbiosis.harness.adapters import Event
 from symbiosis.harness.config import HarnessConfig, ProviderConfig, AdapterConfig, InstanceConfig
 from symbiosis.harness.jobqueue import JobQueue
 from symbiosis.harness.registry import Registry
@@ -40,7 +42,7 @@ def _make_species(handler=None):
     return s
 
 
-def _build_worker(db, instances, max_concurrency=None):
+def _build_worker(db, instances, max_concurrency=None, handler=None):
     harness_config = HarnessConfig(
         providers=[
             ProviderConfig(
@@ -52,7 +54,7 @@ def _build_worker(db, instances, max_concurrency=None):
         adapters=[],
     )
     registry = Registry()
-    species = _make_species()
+    species = _make_species(handler=handler)
     registry.register_species(species)
     for inst in instances:
         registry.register_instance(inst)
@@ -74,6 +76,25 @@ def _build_worker(db, instances, max_concurrency=None):
 
 
 class TestWorkerRun:
+    def test_logs_enqueued_instances_and_completion(self, caplog):
+        db = open_store()
+        instances = [_make_instance("a"), _make_instance("b")]
+        worker = _build_worker(db, instances)
+        queue = JobQueue(db)
+
+        queue.enqueue("a", "on_message")
+        queue.enqueue("b", "on_message")
+
+        with patch.object(worker, "_build_context") as mock_ctx:
+            mock_ctx.return_value = MagicMock()
+            with caplog.at_level(logging.INFO):
+                worker.run()
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("Worker cycle started (enqueued_instances=a,b)" in m for m in messages)
+        assert any("Completed a.on_message" in m for m in messages)
+        assert any("Completed b.on_message" in m for m in messages)
+
     def test_drains_queue(self):
         db = open_store()
         instances = [_make_instance("a"), _make_instance("b")]
@@ -109,6 +130,221 @@ class TestWorkerRun:
             worker.run()  # should not raise
 
         assert not queue.has_active("a")
+
+    def test_rehydrates_serialized_events_payload_for_on_message(self):
+        db = open_store()
+        instances = [_make_instance("a")]
+        captured = {}
+
+        def handler(ctx, events=None):  # noqa: ARG001
+            captured["events"] = events
+
+        worker = _build_worker(db, instances, handler=handler)
+        queue = JobQueue(db)
+        queue.enqueue(
+            "a",
+            "on_message",
+            {
+                "events": [
+                    {
+                        "event_id": "$evt",
+                        "sender": "@u:matrix.org",
+                        "body": "hello",
+                        "timestamp": 123,
+                        "room": "main",
+                    }
+                ]
+            },
+        )
+
+        with patch.object(worker, "_build_context") as mock_ctx:
+            mock_ctx.return_value = MagicMock()
+            worker.run()
+
+        events = captured.get("events")
+        assert isinstance(events, list)
+        assert len(events) == 1
+        assert isinstance(events[0], Event)
+        assert events[0].event_id == "$evt"
+        assert events[0].room == "main"
+
+    def test_on_message_defaults_missing_events_and_logs_warning(self, caplog):
+        db = open_store()
+        instances = [_make_instance("a")]
+        captured = {}
+
+        def handler(ctx, events):  # noqa: ARG001
+            captured["events"] = events
+
+        worker = _build_worker(db, instances, handler=handler)
+        queue = JobQueue(db)
+        queue.enqueue("a", "on_message")
+
+        with patch.object(worker, "_build_context") as mock_ctx:
+            mock_ctx.return_value = MagicMock()
+            with caplog.at_level(logging.INFO):
+                worker.run()
+
+        assert captured.get("events") == []
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("on_message payload missing events; defaulting to empty list" in m for m in messages)
+
+    def test_logs_failure_reason_summary_on_handler_error(self, caplog):
+        db = open_store()
+        instances = [_make_instance("a")]
+
+        def handler(ctx, **kwargs):  # noqa: ARG001
+            raise ValueError("boom")
+
+        worker = _build_worker(db, instances, handler=handler)
+        queue = JobQueue(db)
+        queue.enqueue("a", "heartbeat")
+
+        with patch.object(worker, "_build_context") as mock_ctx:
+            mock_ctx.return_value = MagicMock()
+            with caplog.at_level(logging.INFO):
+                worker.run()
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("Failed a.heartbeat" in m and "ValueError: boom" in m for m in messages)
+        assert any("Completed a.heartbeat" in m and "success=False" in m for m in messages)
+
+    def test_on_message_send_policy_allows_one_send_with_events(self):
+        db = open_store()
+        instances = [_make_instance("a")]
+        captured = {}
+
+        class FakeCtx:
+            def __init__(self):
+                self._sent = 0
+
+            def configure_send_policy(self, **kwargs):
+                captured["policy"] = kwargs
+
+            @property
+            def sent_message_count(self):
+                return self._sent
+
+        def handler(ctx, events=None):  # noqa: ARG001
+            captured["events"] = events
+
+        worker = _build_worker(db, instances, handler=handler)
+        queue = JobQueue(db)
+        queue.enqueue(
+            "a",
+            "on_message",
+            {
+                "events": [
+                    {
+                        "event_id": "$evt",
+                        "sender": "@u:matrix.org",
+                        "body": "hello",
+                        "timestamp": 123,
+                        "room": "main",
+                    }
+                ]
+            },
+        )
+
+        with patch.object(worker, "_build_context", return_value=FakeCtx()):
+            worker.run()
+
+        assert isinstance(captured.get("events"), list)
+        assert captured["policy"]["allow_send"] is True
+        assert captured["policy"]["max_sends"] == 1
+
+    def test_on_message_send_policy_blocks_without_events(self):
+        db = open_store()
+        instances = [_make_instance("a")]
+        captured = {}
+
+        class FakeCtx:
+            def __init__(self):
+                self._sent = 0
+
+            def configure_send_policy(self, **kwargs):
+                captured["policy"] = kwargs
+
+            @property
+            def sent_message_count(self):
+                return self._sent
+
+        def handler(ctx, events=None):  # noqa: ARG001
+            captured["events"] = events
+
+        worker = _build_worker(db, instances, handler=handler)
+        queue = JobQueue(db)
+        queue.enqueue("a", "on_message")
+
+        with patch.object(worker, "_build_context", return_value=FakeCtx()):
+            worker.run()
+
+        assert captured["events"] == []
+        assert captured["policy"]["allow_send"] is False
+        assert captured["policy"]["max_sends"] == 0
+
+    def test_heartbeat_send_policy_requires_new_external_messages(self):
+        db = open_store()
+        instances = [_make_instance("a")]
+        captured = {}
+
+        class FakeCtx:
+            def __init__(self):
+                self._sent = 0
+
+            def configure_send_policy(self, **kwargs):
+                captured["policy"] = kwargs
+
+            @property
+            def sent_message_count(self):
+                return self._sent
+
+        def handler(ctx):  # noqa: ARG001
+            captured["handled"] = True
+
+        worker = _build_worker(db, instances, handler=handler)
+        worker._checker_store.put("external_count:a", 3)
+        worker._checker_store.put("send_gate_seen:a:heartbeat", 3)
+        queue = JobQueue(db)
+        queue.enqueue("a", "heartbeat")
+
+        with patch.object(worker, "_build_context", return_value=FakeCtx()):
+            worker.run()
+
+        assert captured.get("handled") is True
+        assert captured["policy"]["allow_send"] is False
+        assert captured["policy"]["max_sends"] == 0
+
+    def test_heartbeat_send_gate_consumed_when_message_sent(self):
+        db = open_store()
+        instances = [_make_instance("a")]
+        captured = {}
+
+        class FakeCtx:
+            def __init__(self):
+                self._sent = 0
+
+            def configure_send_policy(self, **kwargs):
+                captured["policy"] = kwargs
+
+            @property
+            def sent_message_count(self):
+                return self._sent
+
+        def handler(ctx):  # noqa: ARG001
+            ctx._sent = 1
+
+        worker = _build_worker(db, instances, handler=handler)
+        worker._checker_store.put("external_count:a", 5)
+        queue = JobQueue(db)
+        queue.enqueue("a", "heartbeat")
+
+        with patch.object(worker, "_build_context", return_value=FakeCtx()):
+            worker.run()
+
+        assert captured["policy"]["allow_send"] is True
+        assert captured["policy"]["max_sends"] == 1
+        assert worker._checker_store.get("send_gate_seen:a:heartbeat") == 5
 
 
 class TestProviderSlots:

@@ -34,3 +34,7 @@ harness.db-shm
 harness.db-wal
 config/check.plist
 config/work.plist
+logs/symbiosis-work.err
+logs/symbiosis-work.log
+logs/symbiosis-check.err
+logs/symbiosis-check.log

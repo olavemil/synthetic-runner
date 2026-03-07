@@ -41,6 +41,10 @@ class InstanceContext:
         self._store_db = store_db
         self._mailbox = mailbox
         self._instance_config = instance_config
+        self._send_allowed = True
+        self._send_max: int | None = None
+        self._send_reason = ""
+        self._send_count = 0
 
     @property
     def instance_id(self) -> str:
@@ -88,12 +92,25 @@ class InstanceContext:
         messages: list[dict],
         *,
         model: str | None = None,
+        provider: str | None = None,
         system: str | None = None,
         tools: list[dict] | None = None,
         tool_choice: str | dict | None = None,
         max_tokens: int = 1024,
         caller: str = "?",
     ) -> LLMResponse:
+        # Compatibility: toolkit helpers may pass a provider hint.
+        # InstanceContext currently routes to the instance's configured provider.
+        configured_provider = self._instance_config.provider
+        if provider and provider != configured_provider:
+            logger.warning(
+                "Provider override '%s' requested by %s for instance '%s'; "
+                "using configured provider '%s'",
+                provider,
+                caller,
+                self._instance_id,
+                configured_provider,
+            )
         return self._provider.create(
             model=model or self._default_model,
             messages=messages,
@@ -124,6 +141,20 @@ class InstanceContext:
     def send(self, space: str, message: str, reply_to: str | None = None) -> str:
         if self._adapter is None:
             raise RuntimeError(f"No messaging adapter configured for instance '{self._instance_id}'")
+        if not self._send_allowed:
+            logger.info(
+                "Blocked send for instance '%s' (reason=%s)",
+                self._instance_id,
+                self._send_reason or "send policy disallows messaging in this job",
+            )
+            return ""
+        if self._send_max is not None and self._send_count >= self._send_max:
+            logger.info(
+                "Blocked send for instance '%s' (max_sends=%d reached)",
+                self._instance_id,
+                self._send_max,
+            )
+            return ""
         try:
             resolved_space = self._resolve_space(space)
         except KeyError:
@@ -139,7 +170,9 @@ class InstanceContext:
                 fallback_handle,
             )
             resolved_space = fallback_handle
-        return self._adapter.send(resolved_space, message, reply_to)
+        event_id = self._adapter.send(resolved_space, message, reply_to)
+        self._send_count += 1
+        return event_id
 
     def poll(self, space: str, since_token: str | None = None) -> tuple[list[Event], str]:
         if self._adapter is None:
@@ -154,6 +187,22 @@ class InstanceContext:
     def list_spaces(self) -> list[str]:
         """Return configured logical messaging space names."""
         return sorted(self._space_map.keys())
+
+    def configure_send_policy(
+        self,
+        *,
+        allow_send: bool,
+        max_sends: int | None = None,
+        reason: str = "",
+    ) -> None:
+        self._send_allowed = bool(allow_send)
+        self._send_max = max_sends if max_sends is None else max(0, int(max_sends))
+        self._send_reason = reason
+        self._send_count = 0
+
+    @property
+    def sent_message_count(self) -> int:
+        return self._send_count
 
     # --- Inter-instance ---
 

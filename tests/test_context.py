@@ -77,6 +77,16 @@ class TestInstanceContext:
         call_kwargs = ctx._provider.create.call_args
         assert call_kwargs[1]["model"] == "test-model"
 
+    def test_llm_accepts_provider_keyword(self, tmp_path):
+        ctx = make_ctx(tmp_path)
+        ctx.llm(
+            [{"role": "user", "content": "hi"}],
+            provider="test-provider",
+            model="override-model",
+        )
+        call_kwargs = ctx._provider.create.call_args
+        assert call_kwargs[1]["model"] == "override-model"
+
     def test_send_delegates(self, tmp_path):
         adapter = MagicMock()
         adapter.send.return_value = "$event1"
@@ -138,6 +148,27 @@ class TestInstanceContext:
         ctx = make_ctx(tmp_path, adapter=None, messaging=False)
         with pytest.raises(RuntimeError, match="No messaging adapter"):
             ctx.send("main", "hi")
+
+    def test_send_policy_blocks_sends(self, tmp_path):
+        adapter = MagicMock()
+        adapter.send.return_value = "$event-blocked"
+        ctx = make_ctx(tmp_path, adapter=adapter)
+        ctx.configure_send_policy(allow_send=False, max_sends=0, reason="test")
+        result = ctx.send("main", "hello")
+        assert result == ""
+        adapter.send.assert_not_called()
+
+    def test_send_policy_limits_to_one_send(self, tmp_path):
+        adapter = MagicMock()
+        adapter.send.side_effect = ["$event-1", "$event-2"]
+        ctx = make_ctx(tmp_path, adapter=adapter)
+        ctx.configure_send_policy(allow_send=True, max_sends=1, reason="test")
+        first = ctx.send("main", "hello")
+        second = ctx.send("main", "again")
+        assert first == "$event-1"
+        assert second == ""
+        assert ctx.sent_message_count == 1
+        adapter.send.assert_called_once_with("!room:test", "hello", None)
 
     def test_poll_delegates(self, tmp_path):
         adapter = MagicMock()

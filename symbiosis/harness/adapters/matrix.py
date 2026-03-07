@@ -12,7 +12,18 @@ from . import Event, MessagingAdapter
 
 logger = logging.getLogger(__name__)
 
-THINK_PATTERN = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
+THINK_PATTERN = re.compile(
+    r"(?is)<\s*(think|thinking|analysis|reasoning)\b[^>]*>.*?<\s*/\s*\1\s*>"
+)
+THINK_FENCE_PATTERN = re.compile(
+    r"(?is)```(?:\s*(?:think|thinking|analysis|reasoning)[^\n]*)\n.*?```"
+)
+THINK_LINE_PATTERN = re.compile(
+    r"(?im)^\s*<\s*(?:think|thinking|analysis|reasoning)\b[^>]*>.*$"
+)
+THINK_SINGLE_TAG_PATTERN = re.compile(
+    r"(?is)</?\s*(?:think|thinking|analysis|reasoning)\b[^>]*>"
+)
 
 
 class MatrixAdapter(MessagingAdapter):
@@ -20,6 +31,7 @@ class MatrixAdapter(MessagingAdapter):
         self._homeserver = homeserver.rstrip("/")
         self._token = access_token
         self._client = httpx.Client(timeout=30)
+        self._entity_id_cache: str | None = None
 
     @classmethod
     def login(
@@ -53,9 +65,29 @@ class MatrixAdapter(MessagingAdapter):
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self._token}"}
 
+    def get_entity_id(self) -> str | None:
+        """Resolve and cache the authenticated Matrix user ID."""
+        if self._entity_id_cache:
+            return self._entity_id_cache
+
+        resp = self._client.get(
+            self._url("/account/whoami"),
+            headers=self._headers(),
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        user_id = str(data.get("user_id", "")).strip()
+        if not user_id:
+            raise ValueError(f"/account/whoami missing user_id: {data}")
+        self._entity_id_cache = user_id
+        return user_id
+
     def send(self, space_handle: str, message: str, reply_to: str | None = None) -> str:
         """Send a text message to a Matrix room. Returns event ID."""
-        clean = THINK_PATTERN.sub("", message).strip()
+        clean = THINK_PATTERN.sub("", message)
+        clean = THINK_FENCE_PATTERN.sub("", clean).strip()
+        clean = THINK_LINE_PATTERN.sub("", clean)
+        clean = THINK_SINGLE_TAG_PATTERN.sub("", clean).strip()
         if not clean:
             return ""
 
