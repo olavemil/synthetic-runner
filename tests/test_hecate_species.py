@@ -71,7 +71,7 @@ class TestHecateOnMessage:
             user_content = messages[-1]["content"] if messages else ""
             if "Write a brief subconscious note" in user_content:
                 return SimpleNamespace(message="Subconscious update.")
-            if "Rework this into a single final reply." in user_content:
+            if "Write the final reply in your own voice." in user_content:
                 composed_calls.append((caller, user_content))
                 return SimpleNamespace(message="Composed final message.")
             if "Propose exactly one brief way to answer." in user_content:
@@ -93,8 +93,8 @@ class TestHecateOnMessage:
         assert "(Aria) Aria suggestion." in compose_prompt
         assert "(Sable) Sable suggestion." in compose_prompt
         assert "(Lune) Lune suggestion." in compose_prompt
-        assert "Include a clear speaker identity" in compose_prompt
-        assert "but phrasing does not need to be verbatim." in compose_prompt
+        assert "Your character: Bold" in compose_prompt
+        assert "1 to 4 paragraphs" in compose_prompt
 
     def test_on_message_routes_reply_to_latest_room_and_uses_room_scoped_context(self):
         composed_calls = []
@@ -103,7 +103,7 @@ class TestHecateOnMessage:
             user_content = messages[-1]["content"] if messages else ""
             if "Write a brief subconscious note" in user_content:
                 return SimpleNamespace(message="sub.")
-            if "Rework this into a single final reply." in user_content:
+            if "Write the final reply in your own voice." in user_content:
                 composed_calls.append(user_content)
                 return SimpleNamespace(message="Composed for ops.")
             if "Propose exactly one brief way to answer." in user_content:
@@ -122,7 +122,7 @@ class TestHecateOnMessage:
         assert ctx.sent[0] == ("ops", "Composed for ops.")
         assert len(composed_calls) == 1
         prompt = composed_calls[0]
-        assert "This reply will be sent to room 'ops'" in prompt
+        assert "Conversation in room 'ops'" in prompt
         assert "ops message" in prompt
         assert "main message" not in prompt
 
@@ -133,7 +133,7 @@ class TestHecateOnMessage:
             user_content = messages[-1]["content"] if messages else ""
             if "Write a brief subconscious note" in user_content:
                 return SimpleNamespace(message="sub.")
-            if "Rework this into a single final reply." in user_content:
+            if "Write the final reply in your own voice." in user_content:
                 composed_prompts.append(user_content)
                 return SimpleNamespace(message="Composed final message.")
             if "Propose exactly one brief way to answer." in user_content:
@@ -157,7 +157,7 @@ class TestHecateOnMessage:
             if "Write a brief subconscious note" in user_content:
                 voice_name = caller.split("_")[-1]
                 return SimpleNamespace(message=f"{voice_name} subconscious")
-            if "Rework this into a single final reply." in user_content:
+            if "Write the final reply in your own voice." in user_content:
                 return SimpleNamespace(message="Composed final message.")
             if "Propose exactly one brief way to answer." in user_content:
                 return SimpleNamespace(message="suggestion")

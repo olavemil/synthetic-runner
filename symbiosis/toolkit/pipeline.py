@@ -7,6 +7,8 @@ from typing import Any, Callable, TYPE_CHECKING
 
 import yaml
 
+from pathlib import Path
+
 from symbiosis.toolkit import patterns
 
 if TYPE_CHECKING:
@@ -36,6 +38,9 @@ STAGE_REGISTRY: dict[str, Callable] = {
     "distill_memory": patterns.distill_memory,
     "distill_messages": patterns.distill_messages,
     "run_session": patterns.run_session,
+    "llm_generate": patterns.llm_generate,
+    "thinking_session": patterns.thinking_session,
+    "format_context": patterns.format_context,
     "generate_with_identity": _lazy_deliberate("generate_with_identity"),
     "multi_generate": _lazy_deliberate("multi_generate"),
     "multi_vote": _lazy_deliberate("multi_vote"),
@@ -78,6 +83,18 @@ def resolve_input(ctx: InstanceContext, source: str, pipeline_state: dict) -> An
     if source.startswith("config."):
         key = source[len("config."):]
         return ctx.config(key)
+
+    if source.startswith("file:"):
+        rel_path = source[len("file:"):]
+        species_dir = pipeline_state.get("_species_dir")
+        if species_dir:
+            file_path = Path(species_dir) / rel_path
+            if file_path.exists():
+                text = file_path.read_text()
+                text = text.replace("{instance_id}", ctx.instance_id)
+                text = text.replace("{species_id}", ctx.species_id)
+                return text
+        return f"(file not found: {rel_path})"
 
     if source.startswith("store."):
         parts = source[len("store."):].split(".", 1)
@@ -254,9 +271,16 @@ def run_stage(
     return _run_single_stage(ctx, stage_def, pipeline_state)
 
 
-def run_pipeline(ctx: InstanceContext, steps: list[dict], events: list | None = None) -> dict:
+def run_pipeline(
+    ctx: InstanceContext,
+    steps: list[dict],
+    events: list | None = None,
+    initial_state: dict | None = None,
+) -> dict:
     """Execute a pipeline — a linear sequence of stages."""
     pipeline_state: dict = {"_events": events or []}
+    if initial_state:
+        pipeline_state.update(initial_state)
 
     for step in steps:
         logger.info("Running stage: %s", step.get("stage"))

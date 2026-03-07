@@ -434,3 +434,148 @@ def run_session(
             break
 
     return sent_message
+
+
+def llm_generate(
+    ctx: InstanceContext,
+    system: str,
+    content: str,
+    context: str | None = None,
+    max_tokens: int = 2048,
+    caller: str = "llm_generate",
+) -> str:
+    """Single LLM call. Returns the response text stripped of whitespace."""
+    user_content = f"{context}\n\n{content}" if context else content
+    response = ctx.llm(
+        messages=[{"role": "user", "content": user_content}],
+        system=system,
+        max_tokens=max_tokens,
+        caller=caller,
+    )
+    return response.message.strip()
+
+
+def thinking_session(
+    ctx: InstanceContext,
+    system: str,
+    initial_message: str,
+    max_tokens: int = 4096,
+    max_turns: int = 20,
+) -> None:
+    """Tool-use thinking session with append/replace/done tools.
+
+    Writes to thinking.md directly via tool calls. Returns None.
+    """
+    thinking_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "append_thinking",
+                "description": "Append new thoughts to your thinking file.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string", "description": "Thoughts to append"},
+                    },
+                    "required": ["content"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "replace_thinking",
+                "description": "Replace your thinking file with new content.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string", "description": "New thinking content"},
+                    },
+                    "required": ["content"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "done",
+                "description": "Signal that thinking is complete.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "summary": {"type": "string", "description": "Brief summary of thoughts"},
+                    },
+                },
+            },
+        },
+    ]
+
+    messages = [{"role": "user", "content": initial_message}]
+
+    for _turn in range(max_turns):
+        response = ctx.llm(
+            messages=messages,
+            system=system,
+            tools=thinking_tools,
+            max_tokens=max_tokens,
+            caller="thinking_session",
+        )
+
+        if not response.tool_calls:
+            break
+
+        assistant_msg: dict = {"role": "assistant", "content": response.message or ""}
+        tool_calls_data = []
+        for tc in response.tool_calls:
+            tool_calls_data.append({
+                "id": tc.id,
+                "type": "function",
+                "function": {"name": tc.name, "arguments": json.dumps(tc.arguments)},
+            })
+        assistant_msg["tool_calls"] = tool_calls_data
+        messages.append(assistant_msg)
+
+        is_done = False
+        for tc in response.tool_calls:
+            if tc.name == "append_thinking":
+                existing = ctx.read("thinking.md") or ""
+                new_content = (existing + "\n\n" + tc.arguments.get("content", "")).strip()
+                ctx.write("thinking.md", new_content)
+                result = "Thoughts appended."
+            elif tc.name == "replace_thinking":
+                ctx.write("thinking.md", tc.arguments.get("content", ""))
+                result = "Thinking replaced."
+            elif tc.name == "done":
+                is_done = True
+                result = tc.arguments.get("summary", "Done.")
+            else:
+                result = f"Unknown tool: {tc.name}"
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": result,
+            })
+
+        if is_done:
+            break
+
+
+def format_context(
+    ctx: InstanceContext,
+    sections: list,
+) -> str:
+    """Build a labeled context block from a list of (filepath, label) tuples.
+
+    Reads each file from ctx storage, skips empty files.
+    Returns a single string with ## headings.
+    """
+    parts = []
+    for item in sections:
+        if isinstance(item, (list, tuple)) and len(item) == 2:
+            filepath, label = item[0], item[1]
+        else:
+            continue
+        content = ctx.read(str(filepath)) or ""
+        if content.strip():
+            parts.append(f"## {label}\n\n{content.strip()}")
+    return "\n\n".join(parts)

@@ -1,0 +1,26 @@
+steps:
+  # Phase 1: Intuition — messages + dreams → raw impressions
+  - stage: llm_generate
+    inputs:
+      system: file:prompts/intuition.md
+      content: pipeline.intuition_context
+    outputs:
+      result: pipeline.visions
+
+  # Phase 2: Worry — messages + concerns + visions → considered approach
+  - stage: llm_generate
+    inputs:
+      system: file:prompts/worry.md
+      content: pipeline.worry_context
+      context: pipeline.visions
+    outputs:
+      result: pipeline.approach
+
+  # Phase 3: Action — messages + thinking + approach → final response
+  - stage: llm_generate
+    inputs:
+      system: file:prompts/action.md
+      content: pipeline.action_context
+      context: pipeline.approach
+    outputs:
+      result: pipeline.response

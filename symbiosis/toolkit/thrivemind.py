@@ -298,6 +298,14 @@ def summarize_message_history(
     return summary
 
 
+_REFLECTION_CONTEXT_LIMITS = {
+    "colony_md": 1000,
+    "constitution": 2000,
+    "prior_reflection": 800,
+    "message_summary": 600,
+}
+
+
 def build_reflection_context(
     colony_md: str,
     constitution: str,
@@ -306,13 +314,29 @@ def build_reflection_context(
 ) -> str:
     parts = []
     if colony_md:
-        parts.append(f"## Colony\n{colony_md}")
+        cm = (colony_md or "").strip()
+        max_cm = _REFLECTION_CONTEXT_LIMITS["colony_md"]
+        if len(cm) > max_cm:
+            cm = cm[:max_cm] + "\n...[truncated]"
+        parts.append(f"## Colony\n{cm}")
     if constitution:
-        parts.append(f"## Constitution\n{constitution}")
+        cs = (constitution or "").strip()
+        max_cs = _REFLECTION_CONTEXT_LIMITS["constitution"]
+        if len(cs) > max_cs:
+            cs = cs[:max_cs] + "\n...[truncated]"
+        parts.append(f"## Constitution\n{cs}")
     if prior_reflection:
-        parts.append(f"## Prior Reflection\n{prior_reflection}")
+        pr = (prior_reflection or "").strip()
+        max_pr = _REFLECTION_CONTEXT_LIMITS["prior_reflection"]
+        if len(pr) > max_pr:
+            pr = pr[-max_pr:]  # tail: keep most recent content
+        parts.append(f"## Prior Reflection\n{pr}")
     if message_summary:
-        parts.append(f"## Message Summary\n{message_summary}")
+        ms = (message_summary or "").strip()
+        max_ms = _REFLECTION_CONTEXT_LIMITS["message_summary"]
+        if len(ms) > max_ms:
+            ms = ms[:max_ms] + "\n...[truncated]"
+        parts.append(f"## Message Summary\n{ms}")
     return "\n\n".join(parts)
 
 
@@ -470,7 +494,7 @@ def rewrite_constitution(
     target_words = max(20, min(500, input_word_count))
     min_words = max(12, int(target_words * 0.7))
     max_words = max(min_words + 8, int(target_words * 1.3))
-    rewrite_max_tokens = max(256, min(2048, max_words * 4))
+    rewrite_max_tokens = max(512, min(2048, max_words * 4))
 
     # Use a writer identity with the writer model
     provider, model = parse_model(cfg.writer_model) if cfg.writer_model else (None, "")
@@ -478,12 +502,12 @@ def rewrite_constitution(
         name="ColonyWriter",
         model=model,
         provider=provider,
-        personality="You are synthesizing colony principles into a coherent constitution.",
+        personality="You are a scribe immortalizing your colony's principles into a concise constitution.",
     )
     prompt = (
         f"Current constitution:\n{constitution_excerpt}\n\n"
         f"Proposed principles:\n{combined_excerpt}\n\n"
-        "Rewrite the constitution by integrating the strongest principles into a cohesive candidate.\n"
+        "Refine the principles into a new constitution.\n"
         "Constraints:\n"
         "- Output only the final constitution text.\n"
         "- Start directly with the constitution, no preface.\n"

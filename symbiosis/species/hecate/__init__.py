@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import random
 import re
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from symbiosis.species import Species, SpeciesManifest, EntryPoint
@@ -25,6 +26,11 @@ if TYPE_CHECKING:
     from symbiosis.harness.context import InstanceContext
 
 logger = logging.getLogger(__name__)
+
+_SPECIES_DIR = Path(__file__).parent
+_SUGGEST_PROMPT = (_SPECIES_DIR / "prompts/suggest.md").read_text()
+_COMPOSE_PROMPT = (_SPECIES_DIR / "prompts/compose.md").read_text()
+_SUBCONSCIOUS_PROMPT = (_SPECIES_DIR / "prompts/subconscious.md").read_text()
 
 _DEFAULT_VOICE_NAMES = ["Aria", "Sable", "Lune"]
 
@@ -90,13 +96,10 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
     suggestions: list[tuple[str, str]] = []
     for voice in cfg.voices:
         suggestion_prompt = (
-            f"Conversation in room '{target_room}':\n{room_prompt}\n\n"
-            f"You are {voice.name}, one of three internal voices guiding this entity.\n"
-            "Propose exactly one brief way to answer.\n"
-            "Constraints:\n"
-            "- One sentence only.\n"
-            "- Maximum 24 words.\n"
-            "- Return only the sentence.\n"
+            _SUGGEST_PROMPT
+            .replace("{target_room}", target_room)
+            .replace("{conversation}", room_prompt)
+            .replace("{voice_name}", voice.name)
         )
         raw = generate_with_identity(
             ctx,
@@ -117,17 +120,12 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
     joined = "\n".join(f"- ({name}) {text}" for name, text in suggestions)
     composing_voice = random.choice(cfg.voices)
     compose_prompt = (
-        f"Conversation in room '{target_room}':\n{room_prompt}\n\n"
-        f"Draft:\n{joined}\n\n"
-        f"You are {composing_voice.name}, one of three internal voices guiding this entity.\n"
-        "Rework this into a single final reply.\n"
-        "Include a clear speaker identity (for example naming yourself and that you speak on behalf of Hecate), "
-        "but phrasing does not need to be verbatim.\n"
-        f"This reply will be sent to room '{target_room}', where these new messages arrived.\n"
-        "Base the reply on this room's messages.\n"
-        "Length should fit the context and stay within a few short paragraphs.\n"
-        "Do not mention internal process or the multiple voices.\n"
-        "Return only the final reply text."
+        _COMPOSE_PROMPT
+        .replace("{target_room}", target_room)
+        .replace("{conversation}", room_prompt)
+        .replace("{candidates}", joined)
+        .replace("{voice_name}", composing_voice.name)
+        .replace("{personality}", composing_voice.personality)
     )
     final = generate_with_identity(
         ctx,
@@ -150,7 +148,12 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
     # Update each voice's subconscious
     for v in cfg.voices:
         voice_memory = load_voice_memory(ctx, v)
-        new_sub = update_voice_subconscious(ctx, v, full_prompt, shared_memory, voice_memory)
+        subconscious_prompt = (
+            _SUBCONSCIOUS_PROMPT
+            .replace("{conversation}", full_prompt)
+        )
+        new_sub = update_voice_subconscious(ctx, v, full_prompt, shared_memory, voice_memory,
+                                            user_prompt=subconscious_prompt)
         ctx.write(f"{v.name.lower()}_subconscious.md", new_sub)
     logger.info("Hecate on_message completed subconscious updates (voices=%d)", len(cfg.voices))
 

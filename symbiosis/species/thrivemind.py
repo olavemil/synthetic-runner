@@ -236,9 +236,12 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
         "Do not include a separate consensus-status header."
     )
 
+    _WRITER_CONSTITUTION_MAX = 2000
+    constitution_for_writer = (constitution or "")[:_WRITER_CONSTITUTION_MAX]
+
     if result["has_consensus"] or result["candidate_count"] == 1:
         writer_context = (
-            f"{constitution}\n\n"
+            f"{constitution_for_writer}\n\n"
             f"{identity_requirement}"
         )
         final = recompose(
@@ -280,7 +283,7 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
                 fallback,
                 selected_candidates or None,
                 (
-                    f"{constitution}\n\n"
+                    f"{constitution_for_writer}\n\n"
                     f"{identity_requirement}"
                 ),
                 cfg.writer_model,

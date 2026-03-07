@@ -17,6 +17,8 @@ from symbiosis.harness.scheduler import Scheduler, build_providers, build_adapte
 from symbiosis.species import Species
 from symbiosis.setup_wizard import run_setup
 
+logger = logging.getLogger(__name__)
+
 _INSTANCE_TEMPLATE_STEMS = {"example", "sample", "template"}
 
 _KNOWN_COMMANDS = {"run", "setup", "check", "work", "tick", "schedule", "-h", "--help"}
@@ -109,12 +111,19 @@ def _load_registry(base: Path) -> tuple[Registry, object]:
         for config_file in sorted(instances_dir.glob("*.yaml")):
             if _is_template_instance_file(config_file):
                 continue
-            instance_config = load_instance_config(config_file)
-            species_id = instance_config.species
-            if species_id not in registry.list_species():
-                species = load_species(species_id)
-                registry.register_species(species)
-            registry.register_instance(instance_config)
+            try:
+                instance_config = load_instance_config(config_file)
+            except Exception as exc:
+                logger.warning("Skipping instance config %s: %s", config_file.name, exc)
+                continue
+            try:
+                species_id = instance_config.species
+                if species_id not in registry.list_species():
+                    species = load_species(species_id)
+                    registry.register_species(species)
+                registry.register_instance(instance_config)
+            except Exception as exc:
+                logger.warning("Skipping instance %s: %s", config_file.stem, exc)
 
     return registry, harness_config
 
@@ -136,12 +145,19 @@ def _run_scheduler(args: argparse.Namespace) -> None:
         for config_file in sorted(instances_dir.glob("*.yaml")):
             if _is_template_instance_file(config_file):
                 continue
-            instance_config = load_instance_config(config_file)
-            species_id = instance_config.species
-            if species_id not in registry.list_species():
-                species = load_species(species_id)
-                registry.register_species(species)
-            registry.register_instance(instance_config)
+            try:
+                instance_config = load_instance_config(config_file)
+            except Exception as exc:
+                logger.warning("Skipping instance config %s: %s", config_file.name, exc)
+                continue
+            try:
+                species_id = instance_config.species
+                if species_id not in registry.list_species():
+                    species = load_species(species_id)
+                    registry.register_species(species)
+                registry.register_instance(instance_config)
+            except Exception as exc:
+                logger.warning("Skipping instance %s: %s", config_file.stem, exc)
 
     scheduler = Scheduler(
         harness_config=harness_config,

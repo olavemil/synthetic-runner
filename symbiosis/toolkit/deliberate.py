@@ -96,6 +96,8 @@ def multi_generate(
     outputs: dict[str, str] = {}
     for identity in identities:
         use_context = context_by_identity.get(identity.name, context) if context_by_identity else context
+        if use_context and len(use_context) > _VOTE_CONTEXT_MAX_CHARS:
+            use_context = use_context[-_VOTE_CONTEXT_MAX_CHARS:]
         outputs[identity.name] = generate_with_identity(ctx, identity, prompt, use_context, model)
     return outputs
 
@@ -119,7 +121,8 @@ def _generate_ranking(
         f"You are {voter.name}. Personality: {persona}\n"
         "Rank the candidate replies by how well they address the conversation."
     )
-    context_block = f"\nShared context:\n{vote_context}\n\n" if vote_context else ""
+    truncated_context = vote_context[-_VOTE_CONTEXT_MAX_CHARS:] if vote_context else ""
+    context_block = f"\nShared context:\n{truncated_context}\n\n" if truncated_context else ""
     user_msg = (
         f"Conversation:\n{prompt}\n\n"
         f"{context_block}"
@@ -335,6 +338,10 @@ def recompose(
     )
 
 
+_VOICE_MEMORY_MAX_CHARS = 1500   # per-field cap for think_with_context
+_VOTE_CONTEXT_MAX_CHARS = 1500   # per-voter context cap for _generate_ranking
+
+
 def think_with_context(
     ctx: InstanceContext,
     identity: Identity,
@@ -354,11 +361,11 @@ def think_with_context(
 
     if voice_memory:
         if voice_memory.get("subconscious"):
-            parts.append(f"## Your Subconscious\n{voice_memory['subconscious']}")
+            parts.append(f"## Your Subconscious\n{voice_memory['subconscious'][-_VOICE_MEMORY_MAX_CHARS:]}")
         if voice_memory.get("motivation"):
-            parts.append(f"## Your Motivation\n{voice_memory['motivation']}")
+            parts.append(f"## Your Motivation\n{voice_memory['motivation'][-_VOICE_MEMORY_MAX_CHARS:]}")
         if voice_memory.get("thinking"):
-            parts.append(f"## Your Previous Thoughts\n{voice_memory['thinking']}")
+            parts.append(f"## Your Previous Thoughts\n{voice_memory['thinking'][-_VOICE_MEMORY_MAX_CHARS:]}")
 
     full_context = "\n\n".join(parts)
 

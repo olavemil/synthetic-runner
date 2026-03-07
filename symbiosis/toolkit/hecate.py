@@ -146,11 +146,13 @@ def update_voice_subconscious(
     prompt: str,
     shared_memory: dict[str, str],
     voice_memory: dict[str, str],
+    user_prompt: str = "",
 ) -> str:
     """Generate updated subconscious text. Caller writes {name}_subconscious.md."""
     context = _build_memory_context(shared_memory, {"subconscious": voice_memory.get("subconscious", "")})
-    user_prompt = (
-        f"After this conversation:\n{prompt}\n\n"
-        "Write a brief subconscious note to yourself about how you feel and what lingers."
-    )
+    if not user_prompt:
+        user_prompt = (
+            f"After this conversation:\n{prompt}\n\n"
+            "Write a brief subconscious note to yourself about how you feel and what lingers."
+        )
     return generate_with_identity(ctx, identity, user_prompt, context=context)
