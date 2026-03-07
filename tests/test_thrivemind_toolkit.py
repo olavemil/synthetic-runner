@@ -8,7 +8,7 @@ import time
 from symbiosis.harness.store import open_store, NamespacedStore
 from symbiosis.toolkit.identity import AXIS_NAMES, Identity, format_persona
 from symbiosis.toolkit.voting import borda_tally
-from symbiosis.toolkit.hivemind import (
+from symbiosis.toolkit.thrivemind import (
     ThrivemindConfig,
     build_colony_snapshot,
     select_suggesters,

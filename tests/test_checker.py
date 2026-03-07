@@ -217,6 +217,81 @@ class TestCheckerSchedule:
         assert queue.pending_count() == count_before  # nothing added
 
 
+    def test_max_thinks_per_reply_throttles_heartbeat(self):
+        db = open_store()
+        species = _make_species(schedule="* * * * *")
+        instance = _make_instance(schedule={"max_thinks_per_reply": 1})
+        registry = Registry()
+        registry.register_species(species)
+        registry.register_instance(instance)
+
+        checker = Checker(
+            harness_config=_make_harness_config(),
+            registry=registry,
+            store_db=db,
+            base_dir=None,
+        )
+        queue = JobQueue(db)
+
+        def _trigger():
+            checker._store.put("schedule_next:inst-1:heartbeat", time.time() - 1)
+            checker._check_schedules(set())
+            if queue.has_active("inst-1"):
+                job = queue.claim_next("w")
+                queue.complete(job, "w")
+
+        _trigger()  # thinks=1, enqueues (0 < 1)
+        count_after_first = queue.pending_count()
+        _trigger()  # thinks=1 >= 1, skips
+        assert queue.pending_count() == count_after_first  # nothing added
+
+    def test_max_thinks_per_reply_resets_on_message(self):
+        db = open_store()
+        species = _make_species(schedule="* * * * *")
+        instance = _make_instance(schedule={"max_thinks_per_reply": 1}, with_messaging=True)
+        registry = Registry()
+        registry.register_species(species)
+        registry.register_instance(instance)
+
+        checker = Checker(
+            harness_config=_make_harness_config(adapter_type="matrix"),
+            registry=registry,
+            store_db=db,
+            base_dir=None,
+        )
+        queue = JobQueue(db)
+
+        # Saturate thinks_since_reply
+        checker._store.put("thinks_since_reply:inst-1", 5)
+
+        # Simulate a message arriving (poll_instance resets counter)
+        checker._store.put("inst-1:main", "tok0")  # pre-seeded token so poll produces events
+        evt = Event(
+            event_id="$evt1",
+            sender="@user:matrix.org",
+            body="hello",
+            timestamp=1,
+            room="!room:matrix.org",
+        )
+        adapter = MagicMock()
+        adapter.poll.return_value = ([evt], "tok1")
+
+        with patch.object(checker, "_get_adapter", return_value=adapter):
+            checker._poll_instance(instance)
+
+        # Counter should be reset to 0
+        assert checker._store.get("thinks_since_reply:inst-1") == 0
+
+        # Now heartbeat should be schedulable again
+        checker._store.put("schedule_next:inst-1:heartbeat", time.time() - 1)
+        # Drain on_message job first
+        if queue.has_active("inst-1"):
+            job = queue.claim_next("w")
+            queue.complete(job, "w")
+        checker._check_schedules(set())
+        assert queue.pending_count() == 1
+
+
 class TestCheckerReactive:
     def test_reactive_instances_reset_idle(self):
         db = open_store()

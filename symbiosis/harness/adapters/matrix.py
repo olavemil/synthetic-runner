@@ -3,27 +3,14 @@
 from __future__ import annotations
 
 import logging
-import re
 import time
 
 import httpx
 
 from . import Event, MessagingAdapter
+from symbiosis.harness.sanitize import strip_think_blocks
 
 logger = logging.getLogger(__name__)
-
-THINK_PATTERN = re.compile(
-    r"(?is)<\s*(think|thinking|analysis|reasoning)\b[^>]*>.*?<\s*/\s*\1\s*>"
-)
-THINK_FENCE_PATTERN = re.compile(
-    r"(?is)```(?:\s*(?:think|thinking|analysis|reasoning)[^\n]*)\n.*?```"
-)
-THINK_LINE_PATTERN = re.compile(
-    r"(?im)^\s*<\s*(?:think|thinking|analysis|reasoning)\b[^>]*>.*$"
-)
-THINK_SINGLE_TAG_PATTERN = re.compile(
-    r"(?is)</?\s*(?:think|thinking|analysis|reasoning)\b[^>]*>"
-)
 
 
 class MatrixAdapter(MessagingAdapter):
@@ -84,10 +71,7 @@ class MatrixAdapter(MessagingAdapter):
 
     def send(self, space_handle: str, message: str, reply_to: str | None = None) -> str:
         """Send a text message to a Matrix room. Returns event ID."""
-        clean = THINK_PATTERN.sub("", message)
-        clean = THINK_FENCE_PATTERN.sub("", clean).strip()
-        clean = THINK_LINE_PATTERN.sub("", clean)
-        clean = THINK_SINGLE_TAG_PATTERN.sub("", clean).strip()
+        clean = strip_think_blocks(message)
         if not clean:
             return ""
 

@@ -194,8 +194,9 @@ class Checker:
                         len(pending_events),
                     )
                     enqueued = True
-                # Reset idle count on new messages
+                # Reset idle and thinks-since-reply counters on new messages
                 self._store.put(f"idle:{instance_id}", 0)
+                self._store.put(f"thinks_since_reply:{instance_id}", 0)
             else:
                 logger.info("Skipping on_message enqueue for %s; active job already exists", instance_id)
 
@@ -268,6 +269,13 @@ class Checker:
                 except (ValueError, TypeError):
                     max_idle = None
 
+            max_thinks = instance_config.schedule.get("max_thinks_per_reply")
+            if max_thinks is not None:
+                try:
+                    max_thinks = int(max_thinks)
+                except (ValueError, TypeError):
+                    max_thinks = None
+
             for ep_name, cron_expr in schedule_map.items():
                 key = f"schedule_next:{instance_id}:{ep_name}"
                 next_fire = self._store.get(key)
@@ -284,17 +292,30 @@ class Checker:
                 cron = croniter(cron_expr, now)
                 self._store.put(key, cron.get_next(float))
 
-                # Idle throttle for heartbeat-type entry points
-                if max_idle is not None and instance_id not in reactive_instances:
-                    idle_key = f"idle:{instance_id}"
-                    idle_count = self._store.get(idle_key) or 0
-                    if idle_count >= max_idle:
-                        logger.debug(
-                            "Skipping %s.%s (idle=%d >= max=%d)",
-                            instance_id, ep_name, idle_count, max_idle,
-                        )
-                        continue
-                    self._store.put(idle_key, idle_count + 1)
+                if instance_id not in reactive_instances:
+                    # Idle throttle: cap consecutive idle heartbeats
+                    if max_idle is not None:
+                        idle_key = f"idle:{instance_id}"
+                        idle_count = self._store.get(idle_key) or 0
+                        if idle_count >= max_idle:
+                            logger.debug(
+                                "Skipping %s.%s (idle=%d >= max_idle=%d)",
+                                instance_id, ep_name, idle_count, max_idle,
+                            )
+                            continue
+                        self._store.put(idle_key, idle_count + 1)
+
+                    # Thinks-per-reply throttle: cap heartbeats between replies
+                    if max_thinks is not None:
+                        thinks_key = f"thinks_since_reply:{instance_id}"
+                        thinks_count = self._store.get(thinks_key) or 0
+                        if thinks_count >= max_thinks:
+                            logger.debug(
+                                "Skipping %s.%s (thinks_since_reply=%d >= max_thinks_per_reply=%d)",
+                                instance_id, ep_name, thinks_count, max_thinks,
+                            )
+                            continue
+                        self._store.put(thinks_key, thinks_count + 1)
 
                 # Enqueue if not already active
                 if not self._queue.has_active(instance_id):

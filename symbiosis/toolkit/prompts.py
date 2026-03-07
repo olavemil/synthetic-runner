@@ -94,6 +94,24 @@ def format_subconscious_block(memory: dict[str, str]) -> str:
     return f"## Subconscious Assessment\n{content}"
 
 
+def format_rooms_context(ctx: InstanceContext) -> str:
+    """Format all rooms into a prompt context block."""
+    contexts = ctx.get_all_space_contexts()
+    if not contexts:
+        return ""
+    parts = ["## Rooms"]
+    for space_name, info in sorted(contexts.items()):
+        room_name = info.get("name") or space_name
+        topic = info.get("topic", "")
+        members = info.get("members", [])
+        line = f"- **{room_name}**"
+        if topic:
+            line += f": {topic}"
+        line += f" ({len(members)} members)"
+        parts.append(line)
+    return "\n".join(parts)
+
+
 def format_memory_context(memory: dict[str, str], exclude: list[str] | None = None) -> str:
     """Format all memory files into a single context block."""
     exclude = exclude or []

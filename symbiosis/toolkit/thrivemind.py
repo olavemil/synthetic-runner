@@ -11,6 +11,7 @@ import uuid
 from urllib.parse import quote
 from typing import TYPE_CHECKING
 
+from symbiosis.harness.sanitize import strip_think_blocks
 from symbiosis.toolkit.identity import (
     AXES,
     AXIS_NAMES,
@@ -30,18 +31,6 @@ Individual = Identity
 
 COLONY_NAMESPACE = "colony"
 logger = logging.getLogger(__name__)
-_THINK_TAG_RE = re.compile(
-    r"(?is)<\s*(think|thinking|analysis|reasoning)\b[^>]*>.*?<\s*/\s*\1\s*>"
-)
-_THINK_FENCE_RE = re.compile(
-    r"(?is)```(?:\s*(?:think|thinking|analysis|reasoning)[^\n]*)\n.*?```"
-)
-_THINK_LINE_RE = re.compile(
-    r"(?im)^\s*<\s*(?:think|thinking|analysis|reasoning)\b[^>]*>.*$"
-)
-_THINK_SINGLE_TAG_RE = re.compile(
-    r"(?is)</?\s*(?:think|thinking|analysis|reasoning)\b[^>]*>"
-)
 _CODE_FENCE_RE = re.compile(r"(?is)```(?:[a-zA-Z0-9_-]+)?\n(.*?)```")
 _WORD_RE = re.compile(r"\b\w+\b")
 
@@ -51,10 +40,7 @@ def _word_count(text: str) -> int:
 
 
 def _strip_reasoning_blocks(text: str) -> str:
-    cleaned = _THINK_TAG_RE.sub(" ", text or "")
-    cleaned = _THINK_FENCE_RE.sub(" ", cleaned)
-    cleaned = _THINK_LINE_RE.sub(" ", cleaned)
-    cleaned = _THINK_SINGLE_TAG_RE.sub(" ", cleaned)
+    cleaned = strip_think_blocks(text)
     # Keep fenced content when it's not explicitly a thinking block.
     cleaned = _CODE_FENCE_RE.sub(lambda m: m.group(1), cleaned)
     return cleaned
@@ -481,10 +467,10 @@ def rewrite_constitution(
     constitution_excerpt = _truncate_for_prompt(current_constitution, max_chars=5000)
     combined_excerpt = _truncate_for_prompt(combined, max_chars=2600)
     input_word_count = _word_count(current_constitution) + _word_count(combined)
-    target_words = max(20, min(220, input_word_count))
+    target_words = max(20, min(500, input_word_count))
     min_words = max(12, int(target_words * 0.7))
     max_words = max(min_words + 8, int(target_words * 1.3))
-    rewrite_max_tokens = max(256, min(1024, max_words * 4))
+    rewrite_max_tokens = max(256, min(2048, max_words * 4))
 
     # Use a writer identity with the writer model
     provider, model = parse_model(cfg.writer_model) if cfg.writer_model else (None, "")
@@ -514,27 +500,7 @@ def rewrite_constitution(
     )
     rewritten = _sanitize_constitution_candidate(raw, max_words=max_words)
     if not rewritten:
-        retry_prompt = (
-            f"Current constitution:\n{constitution_excerpt}\n\n"
-            f"Proposed principles:\n{combined_excerpt}\n\n"
-            "Your previous output was invalid.\n"
-            "Return only a cohesive constitution draft now.\n"
-            "No preface and no meta commentary."
-        )
-        retry_raw = generate_with_identity(
-            ctx,
-            writer,
-            retry_prompt,
-            model=cfg.writer_model,
-            max_tokens=rewrite_max_tokens,
-        )
-        retry_rewritten = _sanitize_constitution_candidate(retry_raw, max_words=max_words)
-        if retry_rewritten:
-            logger.info(
-                "Recovered constitution candidate after empty sanitized output (final_chars=%d)",
-                len(retry_rewritten),
-            )
-            rewritten = retry_rewritten
+        rewritten = combined
     if rewritten != (raw or "").strip():
         logger.info(
             "Sanitized constitution candidate output (raw_chars=%d, final_chars=%d)",

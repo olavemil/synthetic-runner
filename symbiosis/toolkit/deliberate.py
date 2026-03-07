@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import TYPE_CHECKING
 
+from symbiosis.harness.sanitize import strip_think_blocks
 from symbiosis.toolkit.identity import Identity, format_persona, parse_model
 from symbiosis.toolkit.voting import borda_tally
 
@@ -14,26 +14,6 @@ if TYPE_CHECKING:
     from symbiosis.harness.context import InstanceContext
 
 logger = logging.getLogger(__name__)
-_THINK_TAG_RE = re.compile(
-    r"(?is)<\s*(think|thinking|analysis|reasoning)\b[^>]*>.*?<\s*/\s*\1\s*>"
-)
-_THINK_FENCE_RE = re.compile(
-    r"(?is)```(?:\s*(?:think|thinking|analysis|reasoning)[^\n]*)\n.*?```"
-)
-_THINK_LINE_RE = re.compile(
-    r"(?im)^\s*<\s*(?:think|thinking|analysis|reasoning)\b[^>]*>.*$"
-)
-_THINK_SINGLE_TAG_RE = re.compile(
-    r"(?is)</?\s*(?:think|thinking|analysis|reasoning)\b[^>]*>"
-)
-
-
-def _strip_reasoning_blocks(text: str) -> str:
-    cleaned = _THINK_TAG_RE.sub(" ", text or "")
-    cleaned = _THINK_FENCE_RE.sub(" ", cleaned)
-    cleaned = _THINK_LINE_RE.sub(" ", cleaned)
-    cleaned = _THINK_SINGLE_TAG_RE.sub(" ", cleaned)
-    return cleaned.strip()
 
 
 def generate_with_identity(
@@ -98,7 +78,7 @@ def generate_with_identity(
             kwargs.get("model") or "(default)",
             getattr(response, "finish_reason", "unknown"),
         )
-    return _strip_reasoning_blocks(response.message or "")
+    return strip_think_blocks(response.message or "")
 
 
 def multi_generate(
@@ -387,16 +367,16 @@ def think_with_context(
         lines = [f"**{name}**: {thought}" for name, thought in others_thinking.items()]
         others_block = (
             "\n\n## Other voices' thoughts (not yours)\n"
-            "Treat these as advisory input from the other two voices.\n\n"
+            "Treat these as advisory input from the other voices.\n\n"
             + "\n\n".join(lines)
         )
 
     prompt = (
-        f"You are {identity.name}, one of three internal voices guiding and directing the same entity.\n"
+        f"You are {identity.name}, one voice in a group guiding the same entity.\n"
         "Guidance:\n"
         "- Treat sections labeled 'Your ...' as your own memory and commitments.\n"
         "- Treat 'Other voices' content as someone else's perspective, not your own memory.\n"
-        "- Think from your own perspective while coordinating with the other two voices.\n"
+        "- Think from your own perspective while coordinating with the other voices.\n"
         f"{others_block}\n\n"
         "Write your current thoughts for this iteration."
     )

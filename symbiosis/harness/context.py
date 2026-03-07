@@ -184,6 +184,18 @@ class InstanceContext:
             return {}
         return self._adapter.get_space_context(self._resolve_space(space))
 
+    def get_all_space_contexts(self) -> dict[str, dict]:
+        """Return context for all configured logical spaces."""
+        if self._adapter is None:
+            return {}
+        result = {}
+        for space_name, handle in self._space_map.items():
+            try:
+                result[space_name] = self._adapter.get_space_context(handle)
+            except Exception:
+                result[space_name] = {"room_id": handle}
+        return result
+
     def list_spaces(self) -> list[str]:
         """Return configured logical messaging space names."""
         return sorted(self._space_map.keys())
@@ -219,3 +231,21 @@ class InstanceContext:
 
     def shared_store(self, namespace: str) -> NamespacedStore:
         return NamespacedStore(self._store_db, f"species:{self._species_id}:{namespace}")
+
+    # --- Config summary ---
+
+    def config_summary(self) -> dict:
+        """Return all non-secret instance config as a plain dict."""
+        d: dict = {
+            "instance_id": self._instance_id,
+            "species": self._species_id,
+            "provider": self._instance_config.provider,
+            "model": self._instance_config.model,
+            "spaces": self.list_spaces(),
+        }
+        if self._instance_config.messaging and self._instance_config.messaging.entity_id:
+            d["entity_id"] = self._instance_config.messaging.entity_id
+        if self._instance_config.schedule:
+            d["schedule"] = dict(self._instance_config.schedule)
+        d.update(self._instance_config.extra)
+        return d

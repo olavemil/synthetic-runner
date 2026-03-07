@@ -343,7 +343,7 @@ class TestThinkWithContext:
         identity = _voice("Aria")
         think_with_context(ctx, identity, others_thinking={"Sable": "sable thought"})
         assert "sable thought" in captured[0]
-        assert "one of three internal voices guiding and directing the same entity" in captured[0]
+        assert "one voice in a group guiding the same entity" in captured[0]
         assert "Other voices' thoughts (not yours)" in captured[0]
         assert "someone else's perspective" in captured[0]
 

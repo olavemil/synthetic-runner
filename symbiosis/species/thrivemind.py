@@ -7,7 +7,7 @@ import math
 from typing import TYPE_CHECKING
 
 from symbiosis.species import Species, SpeciesManifest, EntryPoint
-from symbiosis.toolkit.hivemind import (
+from symbiosis.toolkit.thrivemind import (
     build_colony_snapshot,
     ThrivemindConfig,
     build_reflection_context,

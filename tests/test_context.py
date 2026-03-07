@@ -170,6 +170,32 @@ class TestInstanceContext:
         assert ctx.sent_message_count == 1
         adapter.send.assert_called_once_with("!room:test", "hello", None)
 
+    def test_get_all_space_contexts_no_adapter(self, tmp_path):
+        ctx = make_ctx(tmp_path, adapter=None, messaging=False)
+        assert ctx.get_all_space_contexts() == {}
+
+    def test_get_all_space_contexts_delegates(self, tmp_path):
+        adapter = MagicMock()
+        adapter.get_space_context.return_value = {
+            "room_id": "!room:test",
+            "name": "Main Room",
+            "topic": "General",
+            "members": ["@a:test", "@b:test"],
+        }
+        ctx = make_ctx(tmp_path, adapter=adapter)
+        result = ctx.get_all_space_contexts()
+        assert "main" in result
+        assert result["main"]["name"] == "Main Room"
+        assert len(result["main"]["members"]) == 2
+
+    def test_get_all_space_contexts_handles_exception(self, tmp_path):
+        adapter = MagicMock()
+        adapter.get_space_context.side_effect = Exception("network error")
+        ctx = make_ctx(tmp_path, adapter=adapter)
+        result = ctx.get_all_space_contexts()
+        assert "main" in result
+        assert result["main"] == {"room_id": "!room:test"}
+
     def test_poll_delegates(self, tmp_path):
         adapter = MagicMock()
         adapter.poll.return_value = ([], "token1")
@@ -188,6 +214,108 @@ class TestInstanceContext:
         shared = ctx.shared_store("election")
         shared.put("vote:1", {"rank": 1})
         assert shared.get("vote:1") == {"rank": 1}
+
+
+class TestListRoomsTool:
+    def test_list_rooms_returns_room_info(self, tmp_path):
+        adapter = MagicMock()
+        adapter.get_space_context.return_value = {
+            "room_id": "!room:test",
+            "name": "Main Room",
+            "topic": "General chat",
+            "members": ["@a:test", "@b:test"],
+        }
+        ctx = make_ctx(tmp_path, adapter=adapter)
+        from symbiosis.toolkit.tools import handle_tool
+        result, is_done = handle_tool(ctx, "list_rooms", {})
+        assert not is_done
+        assert "Main Room" in result
+        assert "General chat" in result
+        assert "Members: 2" in result
+
+    def test_list_rooms_no_adapter(self, tmp_path):
+        ctx = make_ctx(tmp_path, adapter=None, messaging=False)
+        from symbiosis.toolkit.tools import handle_tool
+        result, is_done = handle_tool(ctx, "list_rooms", {})
+        assert "no rooms" in result
+
+    def test_list_rooms_tool_in_make_tools(self, tmp_path):
+        ctx = make_ctx(tmp_path)
+        from symbiosis.toolkit.tools import make_tools
+        tools = make_tools(ctx)
+        tool_names = [t["function"]["name"] for t in tools]
+        assert "list_rooms" in tool_names
+
+    def test_list_rooms_tool_gated_by_option(self, tmp_path):
+        ctx = make_ctx(tmp_path)
+        from symbiosis.toolkit.tools import make_tools
+        tools = make_tools(ctx, options={"rooms": False})
+        tool_names = [t["function"]["name"] for t in tools]
+        assert "list_rooms" not in tool_names
+
+
+class TestIntrospectTool:
+    def test_introspect_returns_species_description_and_config(self, tmp_path):
+        ctx = make_ctx(tmp_path)
+        from symbiosis.toolkit.tools import handle_tool
+        result, is_done = handle_tool(ctx, "introspect", {})
+        assert not is_done
+        assert "## Instance Config" in result
+        assert "test-1" in result
+        assert "draum" in result
+
+    def test_introspect_includes_spaces(self, tmp_path):
+        ctx = make_ctx(tmp_path)
+        from symbiosis.toolkit.tools import handle_tool
+        result, _ = handle_tool(ctx, "introspect", {})
+        assert "main" in result
+
+    def test_introspect_tool_in_make_tools(self, tmp_path):
+        ctx = make_ctx(tmp_path)
+        from symbiosis.toolkit.tools import make_tools
+        tools = make_tools(ctx)
+        tool_names = [t["function"]["name"] for t in tools]
+        assert "introspect" in tool_names
+
+    def test_introspect_tool_gated_by_option(self, tmp_path):
+        ctx = make_ctx(tmp_path)
+        from symbiosis.toolkit.tools import make_tools
+        tools = make_tools(ctx, options={"introspect": False})
+        tool_names = [t["function"]["name"] for t in tools]
+        assert "introspect" not in tool_names
+
+    def test_config_summary_returns_expected_keys(self, tmp_path):
+        ctx = make_ctx(tmp_path)
+        summary = ctx.config_summary()
+        assert summary["instance_id"] == "test-1"
+        assert summary["species"] == "draum"
+        assert summary["provider"] == "test-provider"
+        assert summary["model"] == "test-model"
+        assert "main" in summary["spaces"]
+        assert summary["entity_id"] == "@bot:test"
+
+
+class TestFormatRoomsContext:
+    def test_format_rooms_context(self, tmp_path):
+        adapter = MagicMock()
+        adapter.get_space_context.return_value = {
+            "room_id": "!room:test",
+            "name": "Main Room",
+            "topic": "General chat",
+            "members": ["@a:test"],
+        }
+        ctx = make_ctx(tmp_path, adapter=adapter)
+        from symbiosis.toolkit.prompts import format_rooms_context
+        result = format_rooms_context(ctx)
+        assert "## Rooms" in result
+        assert "**Main Room**" in result
+        assert "General chat" in result
+        assert "1 members" in result
+
+    def test_format_rooms_context_no_adapter(self, tmp_path):
+        ctx = make_ctx(tmp_path, adapter=None, messaging=False)
+        from symbiosis.toolkit.prompts import format_rooms_context
+        assert format_rooms_context(ctx) == ""
 
 
 class TestMailboxIntegration:

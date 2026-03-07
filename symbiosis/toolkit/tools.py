@@ -2,10 +2,22 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from symbiosis.harness.context import InstanceContext
+
+# Species description files live alongside the species Python modules.
+_SPECIES_DIR = Path(__file__).parent.parent / "species"
+
+
+def _load_species_description(species_id: str) -> str:
+    path = _SPECIES_DIR / f"{species_id}.md"
+    if path.exists():
+        return path.read_text()
+    return "(no species description available)"
 
 
 def make_tools(ctx: InstanceContext, options: dict | None = None) -> list[dict]:
@@ -76,6 +88,19 @@ def make_tools(ctx: InstanceContext, options: dict | None = None) -> list[dict]:
             },
         })
 
+    if opts.get("rooms", True):
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "list_rooms",
+                "description": "List all configured rooms with name, topic, and member count.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+        })
+
     if opts.get("inter_instance", False):
         tools.append({
             "type": "function",
@@ -89,6 +114,22 @@ def make_tools(ctx: InstanceContext, options: dict | None = None) -> list[dict]:
                         "message": {"type": "string", "description": "Message content"},
                     },
                     "required": ["target_id", "message"],
+                },
+            },
+        })
+
+    if opts.get("introspect", True):
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "introspect",
+                "description": (
+                    "Learn how this instance is configured: species description, "
+                    "provider, model, spaces, and species-specific settings."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
                 },
             },
         })
@@ -133,9 +174,38 @@ def handle_tool(ctx: InstanceContext, name: str, arguments: dict) -> tuple[str, 
         )
         return f"Sent (event_id: {event_id})", False
 
+    if name == "list_rooms":
+        contexts = ctx.get_all_space_contexts()
+        if not contexts:
+            return "(no rooms configured)", False
+        lines = []
+        for space_name, info in sorted(contexts.items()):
+            room_name = info.get("name") or space_name
+            topic = info.get("topic", "")
+            members = info.get("members", [])
+            parts = [f"- {room_name}"]
+            if topic:
+                parts.append(f"  Topic: {topic}")
+            parts.append(f"  Members: {len(members)}")
+            lines.append("\n".join(parts))
+        return "\n".join(lines), False
+
     if name == "send_to_instance":
         ctx.send_to(arguments["target_id"], arguments["message"])
         return "Message sent to inbox.", False
+
+    if name == "introspect":
+        desc = _load_species_description(ctx.species_id)
+        summary = ctx.config_summary()
+        config_lines = []
+        for k, v in summary.items():
+            if isinstance(v, (dict, list)):
+                config_lines.append(f"- **{k}**: {json.dumps(v, ensure_ascii=False)}")
+            else:
+                config_lines.append(f"- **{k}**: {v}")
+        config_block = "\n".join(config_lines)
+        result = f"{desc}\n\n---\n\n## Instance Config\n\n{config_block}"
+        return result, False
 
     if name == "done":
         summary = arguments.get("summary", "Done.")
