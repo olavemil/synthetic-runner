@@ -68,6 +68,12 @@ class InstanceContext:
     def exists(self, path: str) -> bool:
         return self._storage.exists(path)
 
+    def read_binary(self, path: str) -> bytes | None:
+        return self._storage.read_binary(path)
+
+    def write_binary(self, path: str, data: bytes) -> None:
+        self._storage.write_binary(path, data)
+
     # --- Config (read-only) ---
 
     def config(self, key: str) -> Any:

@@ -6,6 +6,7 @@ import logging
 import time
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 import yaml
 
@@ -460,3 +461,29 @@ class TestCheckerReactive:
         messages = [r.getMessage() for r in caplog.records]
         assert any("No entity_id configured for inst-1" in m for m in messages)
         assert any("Skipping reactive events for inst-1/main" in m for m in messages)
+
+    def test_poll_instance_timeout_is_logged_without_exception_trace(self, caplog):
+        db = open_store()
+        species = _make_species(schedule="* * * * *")
+        instance = _make_instance(with_messaging=True)
+        registry = Registry()
+        registry.register_species(species)
+        registry.register_instance(instance)
+
+        checker = Checker(
+            harness_config=_make_harness_config(adapter_type="matrix"),
+            registry=registry,
+            store_db=db,
+            base_dir=None,
+        )
+        adapter = MagicMock()
+        adapter.poll.side_effect = httpx.ReadTimeout("timed out")
+
+        with patch.object(checker, "_get_adapter", return_value=adapter):
+            with caplog.at_level(logging.WARNING):
+                got_messages, enqueued = checker._poll_instance(instance)
+
+        assert got_messages is False
+        assert enqueued is False
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("Timeout polling inst-1/main" in m for m in messages)

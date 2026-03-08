@@ -31,6 +31,17 @@ class NamespacedStorage:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
 
+    def read_binary(self, path: str) -> bytes | None:
+        target = self._resolve(path)
+        if not target.exists():
+            return None
+        return target.read_bytes()
+
+    def write_binary(self, path: str, data: bytes) -> None:
+        target = self._resolve(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+
     def list(self, prefix: str = "") -> list[str]:
         search_dir = self._resolve(prefix) if prefix else self._root
         if not search_dir.exists():

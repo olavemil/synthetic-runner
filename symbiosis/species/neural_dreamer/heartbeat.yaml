@@ -1,0 +1,21 @@
+steps:
+  # Phase 1: Think — tool-use session with graph/map access, writes thinking.md
+  - stage: thinking_session
+    inputs:
+      system: pipeline.think_system
+      initial_message: pipeline.thinking_context
+      extra_tools: pipeline.thinking_tools
+
+  # Phase 2: Sleep — consolidation, reads full session state → sleep.md
+  - stage: format_context
+    inputs:
+      sections: pipeline.sleep_sections
+    outputs:
+      result: pipeline.sleep_context
+
+  - stage: llm_generate
+    inputs:
+      system: file:prompts/sleep.md
+      content: pipeline.sleep_context
+    outputs:
+      result: memory.sleep

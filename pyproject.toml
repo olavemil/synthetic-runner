@@ -13,6 +13,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+neural = [
+    "torch>=2.0",
+]
+rendering = [
+    "matplotlib>=3.7",
+    "Pillow>=10.0",
+]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

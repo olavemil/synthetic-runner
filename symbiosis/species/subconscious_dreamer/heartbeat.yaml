@@ -4,6 +4,10 @@ steps:
     inputs:
       system: file:prompts/active_thinking.md
       initial_message: pipeline.thinking_context
+    preprocessors:
+      initial_message:
+        type: truncate
+        max_chars: 6000
 
   # Phase 2: Subconscious evaluation — reads fresh thinking + dreams → concerns.md
   - stage: format_context
@@ -16,6 +20,10 @@ steps:
     inputs:
       system: file:prompts/subconscious.md
       content: pipeline.subconscious_context
+    preprocessors:
+      content:
+        type: truncate
+        max_chars: 6000
     outputs:
       result: memory.concerns
 
@@ -30,5 +38,9 @@ steps:
     inputs:
       system: file:prompts/dreaming.md
       content: pipeline.dreaming_context
+    preprocessors:
+      content:
+        type: truncate
+        max_chars: 6000
     outputs:
       result: memory.dreams

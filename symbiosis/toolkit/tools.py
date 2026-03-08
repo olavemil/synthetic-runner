@@ -14,10 +14,25 @@ _SPECIES_DIR = Path(__file__).parent.parent / "species"
 
 
 def _load_species_description(species_id: str) -> str:
+    parts = []
+
+    # Check sibling file (e.g. species/draum.md)
     path = _SPECIES_DIR / f"{species_id}.md"
     if path.exists():
-        return path.read_text()
-    return "(no species description available)"
+        parts.append(path.read_text())
+
+    # Check inside package directory (e.g. species/neural_dreamer/species.md)
+    pkg_path = _SPECIES_DIR / species_id / "species.md"
+    if pkg_path.exists():
+        parts.append(pkg_path.read_text())
+
+    # Load any additional docs (e.g. species/neural_dreamer/docs/*.md)
+    docs_dir = _SPECIES_DIR / species_id / "docs"
+    if docs_dir.is_dir():
+        for doc in sorted(docs_dir.glob("*.md")):
+            parts.append(doc.read_text())
+
+    return "\n\n---\n\n".join(parts) if parts else "(no species description available)"
 
 
 def make_tools(ctx: InstanceContext, options: dict | None = None) -> list[dict]:
@@ -134,6 +149,14 @@ def make_tools(ctx: InstanceContext, options: dict | None = None) -> list[dict]:
             },
         })
 
+    if opts.get("graph", False):
+        from symbiosis.toolkit.graph import GRAPH_TOOL_SCHEMAS
+        tools.extend(GRAPH_TOOL_SCHEMAS)
+
+    if opts.get("activation_map", False):
+        from symbiosis.toolkit.activation_map import MAP_TOOL_SCHEMAS
+        tools.extend(MAP_TOOL_SCHEMAS)
+
     tools.append({
         "type": "function",
         "function": {
@@ -210,5 +233,13 @@ def handle_tool(ctx: InstanceContext, name: str, arguments: dict) -> tuple[str, 
     if name == "done":
         summary = arguments.get("summary", "Done.")
         return summary, True
+
+    if name.startswith("graph_"):
+        from symbiosis.toolkit.graph import handle_graph_tool
+        return handle_graph_tool(ctx, name, arguments), False
+
+    if name.startswith("map_"):
+        from symbiosis.toolkit.activation_map import handle_map_tool
+        return handle_map_tool(ctx, name, arguments), False
 
     return f"Unknown tool: {name}", False

@@ -461,10 +461,12 @@ def thinking_session(
     initial_message: str,
     max_tokens: int = 4096,
     max_turns: int = 20,
+    extra_tools: list[dict] | None = None,
 ) -> None:
     """Tool-use thinking session with append/replace/done tools.
 
     Writes to thinking.md directly via tool calls. Returns None.
+    Extra tools are dispatched via handle_tool from toolkit.tools.
     """
     thinking_tools = [
         {
@@ -510,6 +512,9 @@ def thinking_session(
         },
     ]
 
+    if extra_tools:
+        thinking_tools.extend(extra_tools)
+
     messages = [{"role": "user", "content": initial_message}]
 
     for _turn in range(max_turns):
@@ -549,7 +554,10 @@ def thinking_session(
                 is_done = True
                 result = tc.arguments.get("summary", "Done.")
             else:
-                result = f"Unknown tool: {tc.name}"
+                from symbiosis.toolkit.tools import handle_tool
+                result, tool_done = handle_tool(ctx, tc.name, tc.arguments)
+                if tool_done:
+                    is_done = True
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,

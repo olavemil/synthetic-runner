@@ -4,6 +4,10 @@ steps:
     inputs:
       system: file:prompts/intuition.md
       content: pipeline.intuition_context
+    preprocessors:
+      content:
+        type: truncate
+        max_chars: 6000
     outputs:
       result: pipeline.visions
 
@@ -13,6 +17,13 @@ steps:
       system: file:prompts/worry.md
       content: pipeline.worry_context
       context: pipeline.visions
+    preprocessors:
+      content:
+        type: truncate
+        max_chars: 6000
+      context:
+        type: truncate
+        max_chars: 2500
     outputs:
       result: pipeline.approach
 
@@ -22,5 +33,12 @@ steps:
       system: file:prompts/action.md
       content: pipeline.action_context
       context: pipeline.approach
+    preprocessors:
+      content:
+        type: truncate
+        max_chars: 6000
+      context:
+        type: truncate
+        max_chars: 2500
     outputs:
       result: pipeline.response

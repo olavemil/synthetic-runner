@@ -62,6 +62,12 @@ class TestInstanceContext:
         assert ctx.exists("test.md")
         assert "test.md" in ctx.list()
 
+    def test_binary_storage_delegates(self, tmp_path):
+        ctx = make_ctx(tmp_path)
+        ctx.write_binary("model.pt", b"\x00\x01\x02")
+        assert ctx.read_binary("model.pt") == b"\x00\x01\x02"
+        assert ctx.read_binary("missing.pt") is None
+
     def test_config_access(self, tmp_path):
         ctx = make_ctx(tmp_path)
         assert ctx.config("instance_id") == "test-1"

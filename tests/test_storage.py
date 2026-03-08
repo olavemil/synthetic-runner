@@ -58,6 +58,26 @@ class TestNamespacedStorage:
         with pytest.raises(ValueError, match="escapes namespace"):
             storage.read("../../etc/passwd")
 
+    def test_read_write_binary(self, tmp_path):
+        storage = NamespacedStorage(tmp_path, "test-instance")
+        data = b"\x00\x01\x02\xff"
+        storage.write_binary("model.pt", data)
+        assert storage.read_binary("model.pt") == data
+
+    def test_read_binary_nonexistent(self, tmp_path):
+        storage = NamespacedStorage(tmp_path, "test-instance")
+        assert storage.read_binary("missing.pt") is None
+
+    def test_write_binary_creates_dirs(self, tmp_path):
+        storage = NamespacedStorage(tmp_path, "test-instance")
+        storage.write_binary("nets/fast.pt", b"\x80")
+        assert storage.read_binary("nets/fast.pt") == b"\x80"
+
+    def test_binary_path_escape_blocked(self, tmp_path):
+        storage = NamespacedStorage(tmp_path, "test-instance")
+        with pytest.raises(ValueError, match="escapes namespace"):
+            storage.read_binary("../../etc/passwd")
+
     def test_namespace_isolation(self, tmp_path):
         s1 = NamespacedStorage(tmp_path, "instance-1")
         s2 = NamespacedStorage(tmp_path, "instance-2")

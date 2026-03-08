@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from croniter import croniter
+import httpx
 
 from symbiosis.harness.adapters import Event
 from symbiosis.harness.config import HarnessConfig, InstanceConfig, load_harness_config, load_instance_config
@@ -166,6 +167,8 @@ class Checker:
                             len(normalized_events),
                             filtered_self,
                         )
+            except httpx.TimeoutException as exc:
+                logger.warning("Timeout polling %s/%s: %s", instance_id, space_name, exc)
             except Exception:
                 logger.exception("Error polling %s/%s", instance_id, space_name)
 
