@@ -106,7 +106,7 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
             voice,
             suggestion_prompt,
             context=context,
-            max_tokens=96,
+            max_tokens=2048,
         )
         suggestion = _to_one_sentence(raw, max_chars=220)
         if suggestion:
@@ -132,7 +132,7 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
         composing_voice,
         compose_prompt,
         context=context,
-        max_tokens=768,
+        max_tokens=4096,
     ).strip()
     if final:
         logger.info(

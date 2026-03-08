@@ -92,6 +92,31 @@ SLOW_VARIABLE_NAMES = [
 ]
 
 
+# Graph summary features for slow net input
+GRAPH_FEATURE_NAMES = [
+    "graph_node_count",      # normalized 0-1
+    "graph_edge_count",      # normalized 0-1
+    "graph_density",         # edges / max_possible_edges
+    "graph_mean_degree",     # normalized
+    "graph_max_degree",      # normalized
+    "graph_mean_weight",     # average edge weight
+    "graph_num_isolates",    # fraction of isolated nodes
+    "graph_mean_salience",   # average salience from metadata
+]
+
+# Map summary features for fast net input
+MAP_FEATURE_NAMES = [
+    "map_mean",           # mean activation
+    "map_variance",       # variance
+    "map_peak_value",     # max absolute value
+    "map_peak_x_norm",    # peak x position (0-1)
+    "map_peak_y_norm",    # peak y position (0-1)
+    "map_trough_value",   # min value
+    "map_active_fraction",# fraction of non-zero cells
+    "map_asymmetry",      # difference between positive and negative mass
+]
+
+
 @dataclass
 class NetConfig:
     """Configuration for a single neural net."""
@@ -138,6 +163,115 @@ def encode_fast_signals(signals: dict[str, float]) -> list[float]:
 def encode_slow_signals(signals: dict[str, float]) -> list[float]:
     """Encode sleep signals into a flat list for slow net input."""
     return [signals.get(name, 0.0) for name in SLOW_SIGNAL_NAMES]
+
+
+def encode_graph_features(graph: Any) -> list[float]:
+    """Encode a SemanticGraph into summary statistics for slow net input.
+
+    Returns a fixed-length vector matching GRAPH_FEATURE_NAMES.
+    Uses simple statistics rather than GNN — appropriate for small nets.
+    """
+    from collections import defaultdict
+
+    n_nodes = len(graph.nodes)
+    n_edges = len(graph.edges)
+
+    if n_nodes == 0:
+        return [0.0] * len(GRAPH_FEATURE_NAMES)
+
+    # Degree computation
+    degrees: dict[str, int] = defaultdict(int)
+    for e in graph.edges:
+        degrees[e.source] += 1
+        degrees[e.target] += 1
+
+    max_possible = n_nodes * (n_nodes - 1) if n_nodes > 1 else 1
+    density = n_edges / max_possible
+
+    deg_values = list(degrees.values()) if degrees else [0]
+    mean_degree = sum(deg_values) / n_nodes
+    max_degree = max(deg_values) if deg_values else 0
+
+    # Normalize counts with soft cap (sigmoid-like squashing)
+    node_norm = min(n_nodes / 100.0, 1.0)
+    edge_norm = min(n_edges / 200.0, 1.0)
+    mean_deg_norm = min(mean_degree / 10.0, 1.0)
+    max_deg_norm = min(max_degree / 20.0, 1.0)
+
+    mean_weight = (sum(e.weight for e in graph.edges) / n_edges) if n_edges > 0 else 0.0
+
+    connected = set(degrees.keys())
+    n_isolates = sum(1 for nid in graph.nodes if nid not in connected)
+    isolate_frac = n_isolates / n_nodes
+
+    saliences = [
+        n.metadata.get("salience", 0.5)
+        for n in graph.nodes.values()
+        if isinstance(n.metadata.get("salience"), (int, float))
+    ]
+    mean_salience = sum(saliences) / len(saliences) if saliences else 0.5
+
+    return [
+        node_norm,
+        edge_norm,
+        density,
+        mean_deg_norm,
+        max_deg_norm,
+        mean_weight,
+        isolate_frac,
+        mean_salience,
+    ]
+
+
+def encode_map_features(m: Any) -> list[float]:
+    """Encode an ActivationMap into summary statistics for fast net input.
+
+    Returns a fixed-length vector matching MAP_FEATURE_NAMES.
+    Uses summary statistics rather than CNN — appropriate for small nets.
+    """
+    flat = [v for row in m.grid for v in row]
+    total = len(flat)
+
+    if total == 0:
+        return [0.0] * len(MAP_FEATURE_NAMES)
+
+    mean_val = sum(flat) / total
+    variance = sum((v - mean_val) ** 2 for v in flat) / total
+
+    peak_val = 0.0
+    peak_x, peak_y = 0, 0
+    trough_val = 0.0
+
+    for y in range(m.height):
+        for x in range(m.width):
+            v = m.grid[y][x]
+            if v > peak_val:
+                peak_val = v
+                peak_x, peak_y = x, y
+            if v < trough_val:
+                trough_val = v
+
+    peak_x_norm = peak_x / max(m.width - 1, 1)
+    peak_y_norm = peak_y / max(m.height - 1, 1)
+
+    nonzero = sum(1 for v in flat if abs(v) > 0.01)
+    active_fraction = nonzero / total
+
+    pos_mass = sum(v for v in flat if v > 0)
+    neg_mass = sum(-v for v in flat if v < 0)
+    total_mass = pos_mass + neg_mass
+    asymmetry = (pos_mass - neg_mass) / total_mass if total_mass > 0 else 0.0
+
+    return [
+        mean_val,
+        variance,
+        peak_val,
+        peak_x_norm,
+        peak_y_norm,
+        trough_val,
+        active_fraction,
+        asymmetry,
+    ]
 
 
 def decode_fast_output(values: list[float], segment_ids: list[str]) -> dict:
@@ -209,14 +343,18 @@ def make_fast_net_config(
     hidden_dim: int = 32,
     num_layers: int = 3,
     learning_rate: float = 0.01,
+    include_map_features: bool = False,
 ) -> NetConfig:
     """Create config for a fast net.
 
-    Input: review signals (7)
+    Input: review signals (7) + optional map features (8)
     Output: segment weights + fast variables
     """
+    input_dim = len(FAST_SIGNAL_NAMES)
+    if include_map_features:
+        input_dim += len(MAP_FEATURE_NAMES)
     return NetConfig(
-        input_dim=len(FAST_SIGNAL_NAMES),
+        input_dim=input_dim,
         hidden_dim=hidden_dim,
         num_layers=num_layers,
         output_dim=num_segments + len(FAST_VARIABLE_NAMES),
@@ -231,14 +369,18 @@ def make_slow_net_config(
     num_layers: int = 5,
     learning_rate: float = 0.001,
     weight_decay: float = 0.01,
+    include_graph_features: bool = False,
 ) -> NetConfig:
     """Create config for a slow net.
 
-    Input: sleep signals (4) — embedding inputs added later
+    Input: sleep signals (4) + optional graph features (8)
     Output: segment weights + slow variables
     """
+    input_dim = len(SLOW_SIGNAL_NAMES)
+    if include_graph_features:
+        input_dim += len(GRAPH_FEATURE_NAMES)
     return NetConfig(
-        input_dim=len(SLOW_SIGNAL_NAMES),
+        input_dim=input_dim,
         hidden_dim=hidden_dim,
         num_layers=num_layers,
         output_dim=num_segments + len(SLOW_VARIABLE_NAMES),

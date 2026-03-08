@@ -16,10 +16,14 @@ from symbiosis.toolkit.neural import (
     SLOW_SIGNAL_NAMES,
     FAST_VARIABLE_NAMES,
     SLOW_VARIABLE_NAMES,
+    GRAPH_FEATURE_NAMES,
+    MAP_FEATURE_NAMES,
     NetConfig,
     CheckpointMeta,
     encode_fast_signals,
     encode_slow_signals,
+    encode_graph_features,
+    encode_map_features,
     decode_fast_output,
     decode_slow_output,
     make_fast_net_config,
@@ -344,3 +348,133 @@ class TestNetCheckpoints:
 
         # Loaded net produces same output
         assert loaded_net.forward(signals) == net.forward(signals)
+
+
+# ---------------------------------------------------------------------------
+# Representation feature encoding (no PyTorch)
+# ---------------------------------------------------------------------------
+
+
+class TestGraphFeatureEncoding:
+    def _make_graph(self):
+        from symbiosis.toolkit.graph import SemanticGraph
+        g = SemanticGraph()
+        g.add_node("a", "Node A", {"salience": 0.8})
+        g.add_node("b", "Node B", {"salience": 0.6})
+        g.add_node("c", "Node C")
+        g.add_node("d", "Node D")  # isolated
+        g.add_edge("a", "b", "connects", weight=0.9)
+        g.add_edge("a", "c", "relates", weight=0.5)
+        g.add_edge("b", "c", "links", weight=0.7)
+        return g
+
+    def test_returns_correct_length(self):
+        g = self._make_graph()
+        result = encode_graph_features(g)
+        assert len(result) == len(GRAPH_FEATURE_NAMES)
+
+    def test_empty_graph(self):
+        from symbiosis.toolkit.graph import SemanticGraph
+        g = SemanticGraph()
+        result = encode_graph_features(g)
+        assert result == [0.0] * len(GRAPH_FEATURE_NAMES)
+
+    def test_density_correct(self):
+        g = self._make_graph()
+        result = encode_graph_features(g)
+        # 4 nodes, 3 edges, max_possible = 4*3 = 12, density = 3/12 = 0.25
+        assert result[2] == pytest.approx(0.25)
+
+    def test_mean_weight(self):
+        g = self._make_graph()
+        result = encode_graph_features(g)
+        # mean weight = (0.9 + 0.5 + 0.7) / 3 = 0.7
+        assert result[5] == pytest.approx(0.7)
+
+    def test_isolate_fraction(self):
+        g = self._make_graph()
+        result = encode_graph_features(g)
+        # 1 isolated node out of 4 = 0.25
+        assert result[6] == pytest.approx(0.25)
+
+    def test_mean_salience(self):
+        g = self._make_graph()
+        result = encode_graph_features(g)
+        # salience values: 0.8, 0.6 (two nodes with explicit salience)
+        assert result[7] == pytest.approx(0.7)
+
+    def test_all_values_bounded(self):
+        g = self._make_graph()
+        result = encode_graph_features(g)
+        assert all(-1.0 <= v <= 1.0 for v in result)
+
+
+class TestMapFeatureEncoding:
+    def _make_map(self):
+        from symbiosis.toolkit.activation_map import ActivationMap
+        m = ActivationMap(8, 8, "x", "y", "test")
+        m.set_region(4, 4, 2, 0.8, "gaussian")
+        m.set(1, 1, -0.5)
+        return m
+
+    def test_returns_correct_length(self):
+        m = self._make_map()
+        result = encode_map_features(m)
+        assert len(result) == len(MAP_FEATURE_NAMES)
+
+    def test_empty_map(self):
+        from symbiosis.toolkit.activation_map import ActivationMap
+        m = ActivationMap(4, 4)
+        result = encode_map_features(m)
+        # All zeros → mean=0, variance=0, peak=0, etc.
+        assert result[0] == 0.0  # mean
+        assert result[1] == 0.0  # variance
+        assert result[2] == 0.0  # peak value
+        assert result[6] == 0.0  # active fraction
+
+    def test_peak_value_captured(self):
+        m = self._make_map()
+        result = encode_map_features(m)
+        assert result[2] > 0.0  # peak value > 0
+
+    def test_trough_value_captured(self):
+        m = self._make_map()
+        result = encode_map_features(m)
+        assert result[5] < 0.0  # trough value < 0
+
+    def test_active_fraction(self):
+        m = self._make_map()
+        result = encode_map_features(m)
+        assert 0.0 < result[6] <= 1.0  # some cells active
+
+    def test_asymmetry_positive_biased(self):
+        from symbiosis.toolkit.activation_map import ActivationMap
+        m = ActivationMap(4, 4)
+        m.set_region(2, 2, 1, 0.9, "hard")
+        result = encode_map_features(m)
+        assert result[7] > 0.0  # more positive mass → positive asymmetry
+
+    def test_asymmetry_negative_biased(self):
+        from symbiosis.toolkit.activation_map import ActivationMap
+        m = ActivationMap(4, 4)
+        m.set_region(2, 2, 2, -0.8, "hard")
+        result = encode_map_features(m)
+        assert result[7] < 0.0  # more negative mass → negative asymmetry
+
+
+class TestConfigWithRepFeatures:
+    def test_fast_config_with_map(self):
+        config = make_fast_net_config(6, include_map_features=True)
+        assert config.input_dim == len(FAST_SIGNAL_NAMES) + len(MAP_FEATURE_NAMES)
+
+    def test_fast_config_without_map(self):
+        config = make_fast_net_config(6, include_map_features=False)
+        assert config.input_dim == len(FAST_SIGNAL_NAMES)
+
+    def test_slow_config_with_graph(self):
+        config = make_slow_net_config(5, include_graph_features=True)
+        assert config.input_dim == len(SLOW_SIGNAL_NAMES) + len(GRAPH_FEATURE_NAMES)
+
+    def test_slow_config_without_graph(self):
+        config = make_slow_net_config(5, include_graph_features=False)
+        assert config.input_dim == len(SLOW_SIGNAL_NAMES)

@@ -1,9 +1,10 @@
 steps:
-  # Phase 1: Gut feeling — immediate unfiltered reaction
+  # Phase 1: Gut feeling — immediate unfiltered reaction (short)
   - stage: llm_generate
     inputs:
       system: pipeline.gut_system
       content: pipeline.gut_context
+      max_tokens: "4096"
     outputs:
       result: pipeline.gut_feeling
 
@@ -13,22 +14,25 @@ steps:
       system: pipeline.suggest_system
       content: pipeline.suggest_context
       context: pipeline.gut_feeling
+      max_tokens: "8192"
     outputs:
       result: pipeline.suggestions
 
-  # Phase 3: Reply — final message
+  # Phase 3: Reply — final message (a few paragraphs)
   - stage: llm_generate
     inputs:
       system: pipeline.reply_system
       content: pipeline.reply_context
       context: pipeline.suggestions
+      max_tokens: "8192"
     outputs:
       result: pipeline.response
 
-  # Phase 4: Review — self-evaluation
+  # Phase 4: Review — self-evaluation (structured signal lines)
   - stage: llm_generate
     inputs:
       system: file:prompts/review.md
       content: pipeline.review_context
+      max_tokens: "4096"
     outputs:
       result: pipeline.last_review

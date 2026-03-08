@@ -102,7 +102,7 @@ class InstanceContext:
         system: str | None = None,
         tools: list[dict] | None = None,
         tool_choice: str | dict | None = None,
-        max_tokens: int = 1024,
+        max_tokens: int = 4096,
         caller: str = "?",
     ) -> LLMResponse:
         # Compatibility: toolkit helpers may pass a provider hint.

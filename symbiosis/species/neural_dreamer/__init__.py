@@ -70,13 +70,20 @@ _SLOW_SEGMENT_IDS = [
 
 
 def _try_nn_weights_and_variables(ctx: InstanceContext) -> tuple[dict[str, float], dict[str, float]] | None:
-    """Try to get weights and variables from neural nets. Returns None if unavailable."""
+    """Try to get weights and variables from neural nets. Returns None if unavailable.
+
+    When graph/map data is available, their summary features are appended to
+    the signal vectors — but only if the loaded net's input_dim matches.
+    """
     try:
         from symbiosis.toolkit.neural import (
             load_fast_net, load_slow_net,
             make_fast_net_config, make_slow_net_config,
             encode_fast_signals, encode_slow_signals,
+            encode_graph_features, encode_map_features,
             decode_fast_output, decode_slow_output,
+            FAST_SIGNAL_NAMES, MAP_FEATURE_NAMES,
+            SLOW_SIGNAL_NAMES, GRAPH_FEATURE_NAMES,
         )
     except ImportError:
         return None
@@ -94,7 +101,16 @@ def _try_nn_weights_and_variables(ctx: InstanceContext) -> tuple[dict[str, float
         # Use last review signals as input, or zeros
         last_review = ctx.read("last_review.md") or ""
         signals = _parse_review_signals(last_review)
-        raw = fast_net.forward(encode_fast_signals(signals))
+        input_vals = encode_fast_signals(signals)
+
+        # Append map features if the net expects them
+        expected_with_map = len(FAST_SIGNAL_NAMES) + len(MAP_FEATURE_NAMES)
+        if fast_net.config.input_dim == expected_with_map:
+            from symbiosis.toolkit.activation_map import load_map
+            m = load_map(ctx)
+            input_vals += encode_map_features(m)
+
+        raw = fast_net.forward(input_vals)
         decoded = decode_fast_output(raw, _FAST_SEGMENT_IDS)
         weights.update(decoded["weights"])
         variables.update(decoded["variables"])
@@ -103,7 +119,16 @@ def _try_nn_weights_and_variables(ctx: InstanceContext) -> tuple[dict[str, float
         # Use sleep signals as input, or zeros
         sleep = ctx.read("sleep.md") or ""
         signals = _parse_sleep_signals(sleep)
-        raw = slow_net.forward(encode_slow_signals(signals))
+        input_vals = encode_slow_signals(signals)
+
+        # Append graph features if the net expects them
+        expected_with_graph = len(SLOW_SIGNAL_NAMES) + len(GRAPH_FEATURE_NAMES)
+        if slow_net.config.input_dim == expected_with_graph:
+            from symbiosis.toolkit.graph import load_graph
+            graph = load_graph(ctx)
+            input_vals += encode_graph_features(graph)
+
+        raw = slow_net.forward(input_vals)
         decoded = decode_slow_output(raw, _SLOW_SEGMENT_IDS)
         weights.update(decoded["weights"])
         variables.update(decoded["variables"])
@@ -165,11 +190,16 @@ def _parse_sleep_signals(sleep_text: str) -> dict[str, float]:
 
 
 def _update_fast_net(ctx: InstanceContext, review_text: str) -> None:
-    """Parse review signals and update fast net."""
+    """Parse review signals and update fast net.
+
+    New nets are created with map features enabled. Existing nets keep
+    their original input_dim — map features are appended only when dims match.
+    """
     try:
         from symbiosis.toolkit.neural import (
             load_fast_net, save_fast_net, make_fast_net_config,
-            encode_fast_signals, decode_fast_output,
+            encode_fast_signals, encode_map_features,
+            FAST_SIGNAL_NAMES, MAP_FEATURE_NAMES,
             CheckpointMeta, record_checkpoint,
         )
     except ImportError:
@@ -179,7 +209,7 @@ def _update_fast_net(ctx: InstanceContext, review_text: str) -> None:
     if not signals:
         return
 
-    config = make_fast_net_config(len(_FAST_SEGMENT_IDS))
+    config = make_fast_net_config(len(_FAST_SEGMENT_IDS), include_map_features=True)
     fast_net, meta = load_fast_net(ctx, fallback_config=config)
     if fast_net is None:
         fast_net = _create_net_with_config(config)
@@ -188,9 +218,12 @@ def _update_fast_net(ctx: InstanceContext, review_text: str) -> None:
 
     input_vals = encode_fast_signals(signals)
 
-    # Training target: the signals themselves as a self-supervised signal.
-    # The net learns to predict its own segment weights from review outcomes.
-    # We use the current output + a nudge toward the signals as target.
+    # Append map features if the net expects them
+    expected_with_map = len(FAST_SIGNAL_NAMES) + len(MAP_FEATURE_NAMES)
+    if fast_net.config.input_dim == expected_with_map:
+        from symbiosis.toolkit.activation_map import load_map
+        input_vals += encode_map_features(load_map(ctx))
+
     current_output = fast_net.forward(input_vals)
     target = _nudge_output(current_output, signals, _FAST_SEGMENT_IDS)
 
@@ -202,11 +235,16 @@ def _update_fast_net(ctx: InstanceContext, review_text: str) -> None:
 
 
 def _update_slow_net(ctx: InstanceContext, sleep_text: str, session_label: str) -> None:
-    """Parse sleep signals and update slow net."""
+    """Parse sleep signals and update slow net.
+
+    New nets are created with graph features enabled. Existing nets keep
+    their original input_dim — graph features are appended only when dims match.
+    """
     try:
         from symbiosis.toolkit.neural import (
             load_slow_net, save_slow_net, make_slow_net_config,
-            encode_slow_signals,
+            encode_slow_signals, encode_graph_features,
+            SLOW_SIGNAL_NAMES, GRAPH_FEATURE_NAMES,
             CheckpointMeta, record_checkpoint,
         )
     except ImportError:
@@ -216,7 +254,7 @@ def _update_slow_net(ctx: InstanceContext, sleep_text: str, session_label: str) 
     if not signals:
         return
 
-    config = make_slow_net_config(len(_SLOW_SEGMENT_IDS))
+    config = make_slow_net_config(len(_SLOW_SEGMENT_IDS), include_graph_features=True)
     slow_net, meta = load_slow_net(ctx, fallback_config=config)
     if slow_net is None:
         slow_net = _create_net_with_config(config)
@@ -224,6 +262,13 @@ def _update_slow_net(ctx: InstanceContext, sleep_text: str, session_label: str) 
             return
 
     input_vals = encode_slow_signals(signals)
+
+    # Append graph features if the net expects them
+    expected_with_graph = len(SLOW_SIGNAL_NAMES) + len(GRAPH_FEATURE_NAMES)
+    if slow_net.config.input_dim == expected_with_graph:
+        from symbiosis.toolkit.graph import load_graph
+        input_vals += encode_graph_features(load_graph(ctx))
+
     current_output = slow_net.forward(input_vals)
     target = _nudge_output(current_output, signals, _SLOW_SEGMENT_IDS)
 

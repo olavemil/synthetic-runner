@@ -22,7 +22,7 @@ def generate_with_identity(
     prompt: str,
     context: str = "",
     model: str = "",
-    max_tokens: int = 512,
+    max_tokens: int = 2048,
 ) -> str:
     """Generate text via the identity's model/provider, with persona in system prompt.
 
@@ -138,7 +138,7 @@ def _generate_ranking(
         use_provider = voter.provider
 
     kwargs: dict = {
-        "max_tokens": 256,
+        "max_tokens": 2048,
         "caller": f"vote_{voter.name}",
         "system": system,
     }
@@ -311,7 +311,7 @@ def recompose(
     all_candidates: dict[str, str] | None = None,
     context: str = "",
     model: str = "",
-    max_tokens: int = 512,
+    max_tokens: int = 4096,
 ) -> str:
     """Rewrite winning text through identity's voice.
 

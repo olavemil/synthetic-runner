@@ -251,7 +251,7 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
             result["candidates"],
             writer_context,
             cfg.writer_model,
-            max_tokens=320,
+            max_tokens=4096,
         )
         outbound = _with_consensus_status(_format_consensus_status(result), final)
         logger.info("Thrivemind on_message sending response to %s", target_room)
@@ -287,7 +287,7 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
                     f"{identity_requirement}"
                 ),
                 cfg.writer_model,
-                max_tokens=320,
+                max_tokens=4096,
             )
             outbound = _with_consensus_status(
                 _format_consensus_status(result, covered_ratio),

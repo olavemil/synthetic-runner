@@ -5,6 +5,7 @@ steps:
       system: pipeline.think_system
       initial_message: pipeline.thinking_context
       extra_tools: pipeline.thinking_tools
+      max_tokens: "16384"
 
   # Phase 2: Sleep — consolidation, reads full session state → sleep.md
   - stage: format_context
@@ -17,5 +18,6 @@ steps:
     inputs:
       system: file:prompts/sleep.md
       content: pipeline.sleep_context
+      max_tokens: "8192"
     outputs:
       result: memory.sleep

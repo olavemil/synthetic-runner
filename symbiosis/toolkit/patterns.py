@@ -66,7 +66,7 @@ Provide your gut-reaction guidance as JSON with keys:
     response = ctx.llm(
         messages=[{"role": "user", "content": user_msg}],
         system=system,
-        max_tokens=1024,
+        max_tokens=4096,
         caller="gut_response",
     )
 
@@ -132,7 +132,7 @@ Plan your response for each room as JSON with keys:
     response = ctx.llm(
         messages=[{"role": "user", "content": user_msg}],
         system=system,
-        max_tokens=2048,
+        max_tokens=4096,
         caller="plan_response",
     )
 
@@ -200,7 +200,7 @@ Output only the message text, nothing else. If you decide not to respond, output
     response = ctx.llm(
         messages=[{"role": "user", "content": user_msg}],
         system=system,
-        max_tokens=2048,
+        max_tokens=4096,
         caller="compose_response",
     )
 
@@ -232,7 +232,7 @@ visible to your conscious self on the next session as a read-only signal."""
     response = ctx.llm(
         messages=[{"role": "user", "content": user_msg}],
         system=system,
-        max_tokens=2048,
+        max_tokens=4096,
         caller="subconscious",
     )
 
@@ -269,7 +269,7 @@ or change in future sessions. This replaces the current intentions.md."""
     response = ctx.llm(
         messages=[{"role": "user", "content": user_msg}],
         system=system,
-        max_tokens=1024,
+        max_tokens=4096,
         caller="react",
     )
 
@@ -315,7 +315,7 @@ topics of interest, and anything noteworthy. Keep it concise."""
         response = ctx.llm(
             messages=[{"role": "user", "content": user_msg}],
             system=system,
-            max_tokens=1024,
+            max_tokens=4096,
             caller="relationships",
         )
 
@@ -354,7 +354,7 @@ Write a compressed digest that preserves all important information."""
     response = ctx.llm(
         messages=[{"role": "user", "content": user_msg}],
         system=system,
-        max_tokens=2048,
+        max_tokens=4096,
         caller="distill_memory",
     )
 
@@ -377,7 +377,7 @@ def distill_messages(ctx: InstanceContext, messages: list[Event]) -> str:
     response = ctx.llm(
         messages=[{"role": "user", "content": user_msg}],
         system=system,
-        max_tokens=1024,
+        max_tokens=4096,
         caller="distill_messages",
     )
 
@@ -441,15 +441,18 @@ def llm_generate(
     system: str,
     content: str,
     context: str | None = None,
-    max_tokens: int = 2048,
+    max_tokens: int | str | None = 2048,
     caller: str = "llm_generate",
 ) -> str:
     """Single LLM call. Returns the response text stripped of whitespace."""
     user_content = f"{context}\n\n{content}" if context else content
+    # Accept string max_tokens from YAML (e.g. "4096") and coerce to int
+    if isinstance(max_tokens, str):
+        max_tokens = int(max_tokens)
     response = ctx.llm(
         messages=[{"role": "user", "content": user_content}],
         system=system,
-        max_tokens=max_tokens,
+        max_tokens=max_tokens or 2048,
         caller=caller,
     )
     return response.message.strip()
@@ -459,8 +462,8 @@ def thinking_session(
     ctx: InstanceContext,
     system: str,
     initial_message: str,
-    max_tokens: int = 4096,
-    max_turns: int = 20,
+    max_tokens: int | str | None = 4096,
+    max_turns: int | str = 20,
     extra_tools: list[dict] | None = None,
 ) -> None:
     """Tool-use thinking session with append/replace/done tools.
@@ -468,6 +471,11 @@ def thinking_session(
     Writes to thinking.md directly via tool calls. Returns None.
     Extra tools are dispatched via handle_tool from toolkit.tools.
     """
+    # Accept string values from YAML pipeline
+    if isinstance(max_tokens, str):
+        max_tokens = int(max_tokens)
+    if isinstance(max_turns, str):
+        max_turns = int(max_turns)
     thinking_tools = [
         {
             "type": "function",
