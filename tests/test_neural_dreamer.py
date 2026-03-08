@@ -152,6 +152,10 @@ class TestNeuralDreamerHeartbeat:
                 ToolCall(id="t1", name="append_thinking", arguments={"content": "new insight"}),
                 ToolCall(id="t2", name="done", arguments={"summary": "done thinking"}),
             ]),
+            # llm_generate for subconscious → concerns.md
+            LLMResponse(message="Unresolved tension about identity.", tool_calls=[]),
+            # llm_generate for dreaming → dreams.md
+            LLMResponse(message="Dream of the shifting graph\nNodes rearranging.", tool_calls=[]),
             # llm_generate for sleep → sleep.md
             LLMResponse(message="Session was coherent. I felt engaged.", tool_calls=[]),
         ])
@@ -163,6 +167,10 @@ class TestNeuralDreamerHeartbeat:
         assert "coherent" in files.get("sleep.md", "")
         # thinking.md should contain new insight
         assert "new insight" in files.get("thinking.md", "")
+        # concerns.md updated
+        assert "tension" in files.get("concerns.md", "")
+        # dreams.md updated
+        assert "Dream of the" in files.get("dreams.md", "")
         # reviews.md cleared after sleep
         assert files.get("reviews.md", "") == ""
 

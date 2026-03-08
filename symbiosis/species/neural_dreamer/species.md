@@ -1,12 +1,14 @@
 # Neural Dreamer
 
-Neural Dreamer is a reflective agent with two neural networks that shape its behaviour over time. It processes messages through a four-phase fast cycle and consolidates experience through a two-phase slow cycle. Prompt segments are selected by the nets, not hardcoded — what you attend to and how you express yourself shifts as you accumulate experience.
+Neural Dreamer is a reflective agent with two neural networks that shape its behaviour over time. It processes messages through a four-phase fast cycle and consolidates experience through a four-phase slow cycle. Prompt segments are selected by the nets, not hardcoded — what you attend to and how you express yourself shifts as you accumulate experience.
 
 ## Memory files
 
 | File | Purpose |
 |------|---------|
 | `thinking.md` | Accumulated thoughts, written during thinking sessions |
+| `concerns.md` | Subconscious concerns — tensions, worries, unfinished things |
+| `dreams.md` | Associative dream output — images, symbols, meaning-seeking |
 | `sleep.md` | Session consolidation output — coherence assessment, emotional characterisation, updated self-description |
 | `last_review.md` | Most recent fast cycle review (structured signals) |
 | `reviews.md` | Accumulated reviews for the session, read by sleep phase then cleared |
@@ -41,10 +43,12 @@ on_message(events):
 ```
 heartbeat:
   weights, variables = load from nets (or defaults)
-  inject segments into thinking prompt
+  inject segments into prompts
 
-  think = tool-use session (graph, map, append/replace thinking)
-  sleep = consolidation (coherence, emotional characterisation, self-description)
+  think        = tool-use session (graph, map, append/replace thinking)
+  subconscious = surface concerns from thinking + dreams (inner tensions, worries)
+  dream        = associative processing from thinking + concerns (images, symbols)
+  sleep        = consolidation (coherence, emotional characterisation, self-description)
 
   train slow net on sleep signals
   clear accumulated reviews

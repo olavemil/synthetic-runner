@@ -7,7 +7,37 @@ steps:
       extra_tools: pipeline.thinking_tools
       max_tokens: "16384"
 
-  # Phase 2: Sleep — consolidation, reads full session state → sleep.md
+  # Phase 2: Subconscious — reads thinking + dreams → concerns.md
+  - stage: format_context
+    inputs:
+      sections: pipeline.subconscious_sections
+    outputs:
+      result: pipeline.subconscious_context
+
+  - stage: llm_generate
+    inputs:
+      system: pipeline.subconscious_system
+      content: pipeline.subconscious_context
+      max_tokens: "4096"
+    outputs:
+      result: memory.concerns
+
+  # Phase 3: Dreaming — reads thinking + concerns → dreams.md
+  - stage: format_context
+    inputs:
+      sections: pipeline.dreaming_sections
+    outputs:
+      result: pipeline.dreaming_context
+
+  - stage: llm_generate
+    inputs:
+      system: pipeline.dreaming_system
+      content: pipeline.dreaming_context
+      max_tokens: "4096"
+    outputs:
+      result: memory.dreams
+
+  # Phase 4: Sleep — consolidation, reads full session state → sleep.md
   - stage: format_context
     inputs:
       sections: pipeline.sleep_sections

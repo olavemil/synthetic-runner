@@ -98,7 +98,7 @@ class TestCheckerSchedule:
 
         messages = [r.getMessage() for r in caplog.records]
         assert any("Checker cycle started (instances=1)" in m for m in messages)
-        assert any("Checker cycle finished (scheduled_instances=1)" in m for m in messages)
+        assert any("Checker cycle finished" in m and "scheduled=1" in m for m in messages)
 
     def test_enqueues_due_scheduled_ep(self):
         db = open_store()
@@ -149,7 +149,7 @@ class TestCheckerSchedule:
         queue = JobQueue(db)
         assert queue.pending_count() == 1
 
-    def test_run_prioritizes_due_schedule_before_reactive_enqueue(self):
+    def test_run_prioritizes_messages_before_scheduled_jobs(self):
         db = open_store()
         species = _make_species(schedule="* * * * *")
         instance = _make_instance(with_messaging=True)
@@ -183,15 +183,17 @@ class TestCheckerSchedule:
         with patch.object(checker, "_get_adapter", return_value=adapter):
             checker.run()
 
+        # Messages are polled first, so on_message gets enqueued.
+        # The instance guard then blocks the heartbeat.
         pending = queue.list_pending()
         assert len(pending) == 1
-        assert pending[0].entry_point == "heartbeat"
+        assert pending[0].entry_point == "on_message"
         assert checker._store.get("external_count:inst-1") == 1
 
     def test_idle_throttling(self):
         db = open_store()
         species = _make_species(schedule="* * * * *")
-        instance = _make_instance(schedule={"max_idle_heartbeats": 2})
+        instance = _make_instance(schedule={"max_idle_heartbeats": 2, "max_thinks_per_reply": 10})
         registry = Registry()
         registry.register_species(species)
         registry.register_instance(instance)

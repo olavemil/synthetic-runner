@@ -63,26 +63,26 @@ class Checker:
     # ------------------------------------------------------------------
 
     def run(self) -> None:
-        """Execute one check cycle: poll adapters + check schedules."""
+        """Execute one check cycle: poll adapters + check schedules.
+
+        Messages are always prioritised over scheduled tasks. We poll first,
+        enqueue any on_message jobs, then check schedules — so an instance
+        with pending messages will never have a heartbeat enqueued instead.
+        """
         instances = self._registry.list_instances()
         logger.info("Checker cycle started (instances=%d)", len(instances))
-        # Enqueue due scheduled jobs first so heartbeat-like tasks are not
-        # indefinitely starved by frequent on_message enqueues.
-        scheduled_instances: set[str] = self._check_schedules(set())
         reactive_instances: set[str] = set()
 
+        # Poll for messages first — reactive work takes priority.
         for instance_config in instances:
-            got_messages, enqueued = self._poll_instance(instance_config)
+            got_messages, _enqueued = self._poll_instance(instance_config)
             if got_messages:
                 reactive_instances.add(instance_config.instance_id)
-            if enqueued:
-                scheduled_instances.add(instance_config.instance_id)
 
-        # Run schedule pass again after polling to keep idle counters aligned
-        # with this cycle's reactive activity and to catch any entry points that
-        # became due during long polling loops.
-        scheduled_instances.update(self._check_schedules(reactive_instances))
-        logger.info("Checker cycle finished (scheduled_instances=%d)", len(scheduled_instances))
+        # Now check schedules, knowing which instances already have messages.
+        scheduled_instances = self._check_schedules(reactive_instances)
+        logger.info("Checker cycle finished (reactive=%d, scheduled=%d)",
+                     len(reactive_instances), len(scheduled_instances))
 
     # ------------------------------------------------------------------
     # Reactive polling
@@ -272,12 +272,11 @@ class Checker:
                 except (ValueError, TypeError):
                     max_idle = None
 
-            max_thinks = instance_config.schedule.get("max_thinks_per_reply")
-            if max_thinks is not None:
-                try:
-                    max_thinks = int(max_thinks)
-                except (ValueError, TypeError):
-                    max_thinks = None
+            max_thinks = instance_config.schedule.get("max_thinks_per_reply", 1)
+            try:
+                max_thinks = int(max_thinks)
+            except (ValueError, TypeError):
+                max_thinks = 1
 
             for ep_name, cron_expr in schedule_map.items():
                 key = f"schedule_next:{instance_id}:{ep_name}"

@@ -42,6 +42,8 @@ _REGISTRY = load_registry(_SPECIES_DIR / "segments" / "registry.yaml")
 
 DEFAULT_FILES = {
     "thinking.md": "# Thinking\n",
+    "dreams.md": "",
+    "concerns.md": "",
     "sleep.md": "",
     "last_review.md": "",
     "reviews.md": "",
@@ -88,50 +90,73 @@ def _try_nn_weights_and_variables(ctx: InstanceContext) -> tuple[dict[str, float
     except ImportError:
         return None
 
-    fast_net, _ = load_fast_net(ctx)
-    slow_net, _ = load_slow_net(ctx)
+    fast_net, fast_meta = load_fast_net(ctx)
+    slow_net, slow_meta = load_slow_net(ctx)
 
     if fast_net is None and slow_net is None:
+        logger.info("NN forward: no nets available, falling back to defaults")
         return None
 
     weights: dict[str, float] = {}
     variables: dict[str, float] = {}
 
     if fast_net is not None:
-        # Use last review signals as input, or zeros
         last_review = ctx.read("last_review.md") or ""
         signals = _parse_review_signals(last_review)
         input_vals = encode_fast_signals(signals)
 
         # Append map features if the net expects them
+        has_map = False
         expected_with_map = len(FAST_SIGNAL_NAMES) + len(MAP_FEATURE_NAMES)
         if fast_net.config.input_dim == expected_with_map:
             from symbiosis.toolkit.activation_map import load_map
             m = load_map(ctx)
             input_vals += encode_map_features(m)
+            has_map = True
 
         raw = fast_net.forward(input_vals)
         decoded = decode_fast_output(raw, _FAST_SEGMENT_IDS)
         weights.update(decoded["weights"])
         variables.update(decoded["variables"])
 
+        top_weights = sorted(decoded["weights"].items(), key=lambda x: x[1], reverse=True)[:3]
+        top_str = ", ".join(f"{k}={v:.2f}" for k, v in top_weights)
+        var_str = ", ".join(f"{k}={v:.2f}" for k, v in decoded["variables"].items())
+        logger.info(
+            "Fast net forward (updates=%d, signals=%d, map=%s): top_weights=[%s] vars=[%s]",
+            fast_meta.update_count, len(signals), has_map, top_str, var_str,
+        )
+    else:
+        logger.info("Fast net not available, using default state/relational/meta weights")
+
     if slow_net is not None:
-        # Use sleep signals as input, or zeros
         sleep = ctx.read("sleep.md") or ""
         signals = _parse_sleep_signals(sleep)
         input_vals = encode_slow_signals(signals)
 
         # Append graph features if the net expects them
+        has_graph = False
         expected_with_graph = len(SLOW_SIGNAL_NAMES) + len(GRAPH_FEATURE_NAMES)
         if slow_net.config.input_dim == expected_with_graph:
             from symbiosis.toolkit.graph import load_graph
             graph = load_graph(ctx)
             input_vals += encode_graph_features(graph)
+            has_graph = True
 
         raw = slow_net.forward(input_vals)
         decoded = decode_slow_output(raw, _SLOW_SEGMENT_IDS)
         weights.update(decoded["weights"])
         variables.update(decoded["variables"])
+
+        top_weights = sorted(decoded["weights"].items(), key=lambda x: x[1], reverse=True)[:3]
+        top_str = ", ".join(f"{k}={v:.2f}" for k, v in top_weights)
+        var_str = ", ".join(f"{k}={v:.2f}" for k, v in decoded["variables"].items())
+        logger.info(
+            "Slow net forward (updates=%d, signals=%d, graph=%s): top_weights=[%s] vars=[%s]",
+            slow_meta.update_count, len(signals), has_graph, top_str, var_str,
+        )
+    else:
+        logger.info("Slow net not available, using default identity/temporal/task weights")
 
     return weights, variables
 
@@ -141,11 +166,11 @@ def _load_weights_and_variables(ctx: InstanceContext) -> tuple[dict[str, float],
     nn_result = _try_nn_weights_and_variables(ctx)
     if nn_result is not None:
         weights, variables = nn_result
-        # Merge with defaults for any missing segments
         merged_weights = dict(_DEFAULT_WEIGHTS)
         merged_weights.update(weights)
         merged_variables = dict(DEFAULT_VARIABLES)
         merged_variables.update(variables)
+        logger.info("Weights source: neural nets (%d weights, %d variables)", len(merged_weights), len(merged_variables))
         return merged_weights, merged_variables
 
     # Fall back to manual weights from storage or defaults
@@ -153,9 +178,11 @@ def _load_weights_and_variables(ctx: InstanceContext) -> tuple[dict[str, float],
     if raw:
         try:
             weights = json.loads(raw)
+            logger.info("Weights source: segment_weights.json (%d weights)", len(weights))
             return weights, dict(DEFAULT_VARIABLES)
         except (json.JSONDecodeError, TypeError):
             pass
+    logger.info("Weights source: hardcoded defaults")
     return dict(_DEFAULT_WEIGHTS), dict(DEFAULT_VARIABLES)
 
 
@@ -207,14 +234,23 @@ def _update_fast_net(ctx: InstanceContext, review_text: str) -> None:
 
     signals = _parse_review_signals(review_text)
     if not signals:
+        logger.debug("Fast net update skipped: no signals parsed from review")
         return
+
+    sig_str = ", ".join(f"{k}={v:.2f}" for k, v in signals.items())
+    logger.info("Fast net update: parsed signals [%s]", sig_str)
 
     config = make_fast_net_config(len(_FAST_SEGMENT_IDS), include_map_features=True)
     fast_net, meta = load_fast_net(ctx, fallback_config=config)
+    created_new = False
     if fast_net is None:
         fast_net = _create_net_with_config(config)
         if fast_net is None:
+            logger.warning("Fast net update: PyTorch unavailable, cannot create net")
             return
+        created_new = True
+        logger.info("Fast net created (input_dim=%d, hidden=%d, output_dim=%d)",
+                     config.input_dim, config.hidden_dim, config.output_dim)
 
     input_vals = encode_fast_signals(signals)
 
@@ -227,11 +263,13 @@ def _update_fast_net(ctx: InstanceContext, review_text: str) -> None:
     current_output = fast_net.forward(input_vals)
     target = _nudge_output(current_output, signals, _FAST_SEGMENT_IDS)
 
-    fast_net.train_step(input_vals, target)
+    loss = fast_net.train_step(input_vals, target)
 
     meta.update_count += 1
     save_fast_net(ctx, fast_net, meta)
     record_checkpoint(ctx, f"fast_update_{meta.update_count}", "fast")
+    logger.info("Fast net trained: update_count=%d, loss=%.6f%s",
+                meta.update_count, loss, " (new net)" if created_new else "")
 
 
 def _update_slow_net(ctx: InstanceContext, sleep_text: str, session_label: str) -> None:
@@ -252,14 +290,23 @@ def _update_slow_net(ctx: InstanceContext, sleep_text: str, session_label: str) 
 
     signals = _parse_sleep_signals(sleep_text)
     if not signals:
+        logger.debug("Slow net update skipped: no signals parsed from sleep output")
         return
+
+    sig_str = ", ".join(f"{k}={v:.2f}" for k, v in signals.items())
+    logger.info("Slow net update: parsed signals [%s] (session=%s)", sig_str, session_label)
 
     config = make_slow_net_config(len(_SLOW_SEGMENT_IDS), include_graph_features=True)
     slow_net, meta = load_slow_net(ctx, fallback_config=config)
+    created_new = False
     if slow_net is None:
         slow_net = _create_net_with_config(config)
         if slow_net is None:
+            logger.warning("Slow net update: PyTorch unavailable, cannot create net")
             return
+        created_new = True
+        logger.info("Slow net created (input_dim=%d, hidden=%d, output_dim=%d)",
+                     config.input_dim, config.hidden_dim, config.output_dim)
 
     input_vals = encode_slow_signals(signals)
 
@@ -272,12 +319,14 @@ def _update_slow_net(ctx: InstanceContext, sleep_text: str, session_label: str) 
     current_output = slow_net.forward(input_vals)
     target = _nudge_output(current_output, signals, _SLOW_SEGMENT_IDS)
 
-    slow_net.train_step(input_vals, target)
+    loss = slow_net.train_step(input_vals, target)
 
     meta.update_count += 1
     meta.session_label = session_label
     save_slow_net(ctx, slow_net, meta)
     record_checkpoint(ctx, session_label, "slow")
+    logger.info("Slow net trained: update_count=%d, loss=%.6f, session=%s%s",
+                meta.update_count, loss, session_label, " (new net)" if created_new else "")
 
 
 def _create_net_with_config(config: Any) -> Any:
@@ -390,11 +439,18 @@ def _graph_map_summary(ctx: InstanceContext) -> str:
 # --- Entry points ---
 
 def heartbeat(ctx: InstanceContext) -> None:
-    """Slow cycle: think → sleep → update slow net."""
+    """Slow cycle: think → subconscious → dream → sleep → update slow net."""
+    logger.info("Heartbeat starting (instance=%s)", ctx.instance_id)
     thinking = ctx.read("thinking.md") or ""
+    dreams = ctx.read("dreams.md") or ""
+    concerns = ctx.read("concerns.md") or ""
     sleep_output = ctx.read("sleep.md") or ""
     reviews = ctx.read("reviews.md") or ""
     rep_summary = _graph_map_summary(ctx)
+    logger.info("Heartbeat context: thinking=%d chars, dreams=%d chars, concerns=%d chars, "
+                "sleep=%d chars, reviews=%d chars, rep=%d chars",
+                len(thinking), len(dreams), len(concerns),
+                len(sleep_output), len(reviews), len(rep_summary))
 
     weights, variables = _load_weights_and_variables(ctx)
 
@@ -405,7 +461,23 @@ def heartbeat(ctx: InstanceContext) -> None:
         ["identity", "state", "meta"],
     )
 
+    # Build subconscious system prompt with segment injection
+    subconscious_template = (_SPECIES_DIR / "prompts" / "subconscious.md").read_text()
+    subconscious_system = _inject_segments(
+        subconscious_template, _REGISTRY, weights, variables,
+        ["state"],
+    )
+
+    # Build dreaming system prompt with segment injection
+    dreaming_template = (_SPECIES_DIR / "prompts" / "dreaming.md").read_text()
+    dreaming_system = _inject_segments(
+        dreaming_template, _REGISTRY, weights, variables,
+        ["identity"],
+    )
+
     thinking_context = _build_context(
+        ("Your Concerns", concerns),
+        ("Your Dreams", dreams),
         ("Your Sleep Consolidation", sleep_output),
         ("Recent Reviews", reviews),
         ("Representation State", rep_summary),
@@ -421,29 +493,50 @@ def heartbeat(ctx: InstanceContext) -> None:
         "think_system": think_system,
         "thinking_context": thinking_context,
         "thinking_tools": thinking_tools,
+        "subconscious_system": subconscious_system,
+        "subconscious_sections": [
+            ["thinking.md", "Your Thoughts"],
+            ["dreams.md", "Your Dreams"],
+        ],
+        "dreaming_system": dreaming_system,
+        "dreaming_sections": [
+            ["thinking.md", "Your Thoughts"],
+            ["concerns.md", "Your Concerns"],
+        ],
         "sleep_sections": [
             ["thinking.md", "Your Thoughts"],
+            ["concerns.md", "Your Concerns"],
+            ["dreams.md", "Your Dreams"],
             ["reviews.md", "Session Reviews"],
             ["sleep.md", "Previous Sleep Output"],
         ],
         "_species_dir": str(_SPECIES_DIR),
     }
 
+    logger.info("Heartbeat running pipeline: think → subconscious → dream → sleep")
     run_pipeline(ctx, _HEARTBEAT_STEPS, initial_state=initial_state)
 
     # Update slow net with sleep output
     new_sleep = ctx.read("sleep.md") or ""
     if new_sleep:
+        logger.info("Heartbeat sleep output: %d chars, updating slow net", len(new_sleep))
         _update_slow_net(ctx, new_sleep, f"heartbeat_{ctx.instance_id}")
+    else:
+        logger.info("Heartbeat: no sleep output produced")
 
     # Clear accumulated reviews after sleep consolidation
     ctx.write("reviews.md", "")
+    logger.info("Heartbeat complete, reviews cleared")
 
 
 def on_message(ctx: InstanceContext, events: list[Event]) -> None:
     """Fast cycle: gut → suggest → reply → review → send."""
     if not events:
         return
+
+    senders = {e.sender for e in events}
+    logger.info("on_message starting (instance=%s, events=%d, senders=%s)",
+                ctx.instance_id, len(events), ", ".join(senders))
 
     events_text = format_events(events)
     thinking = ctx.read("thinking.md") or ""
@@ -497,21 +590,29 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
         "_species_dir": str(_SPECIES_DIR),
     }
 
+    logger.info("on_message running pipeline: gut → suggest → reply → review")
     state = run_pipeline(ctx, _ON_MESSAGE_STEPS, events=events, initial_state=initial_state)
 
     response = state.get("response", "")
     if response and response.strip():
-        ctx.send(_target_room(events, ctx), response.strip())
+        target = _target_room(events, ctx)
+        logger.info("on_message sending reply (%d chars) to %s", len(response.strip()), target)
+        ctx.send(target, response.strip())
+    else:
+        logger.info("on_message: no reply generated")
 
     # Accumulate review into reviews.md for sleep phase
     review = state.get("last_review", "")
     if review:
+        logger.info("on_message review output: %d chars, updating fast net", len(review))
         ctx.write("last_review.md", review)
         existing = ctx.read("reviews.md") or ""
         ctx.write("reviews.md", f"{existing}\n---\n{review}".strip())
 
         # Update fast net with review signals
         _update_fast_net(ctx, review)
+    else:
+        logger.info("on_message: no review output")
 
 
 class NeuralDreamer(Species):
