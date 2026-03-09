@@ -64,6 +64,7 @@ logger = logging.getLogger(__name__)
 
 _SPECIES_DIR = Path(__file__).parent
 _PROMPT_CANDIDATE = (_SPECIES_DIR / "prompts/candidate.md").read_text()
+_PROMPT_RECOMPOSE = (_SPECIES_DIR / "prompts/recompose.md").read_text()
 
 DEFAULT_FILES = {
     "constitution.md": "# Constitution\n",
@@ -190,6 +191,7 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
         final = recompose(
             ctx, writer, result["winner_message"], result["candidates"],
             writer_context, cfg.writer_model, max_tokens=4096,
+            prompt_template=_PROMPT_RECOMPOSE,
         )
         outbound = with_consensus_status(format_consensus_status(result), final)
         logger.info("Thrivemind on_message sending response to %s", target_room)
@@ -215,6 +217,7 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
             final = recompose(
                 ctx, writer, fallback, selected_candidates or None,
                 writer_context, cfg.writer_model, max_tokens=4096,
+                prompt_template=_PROMPT_RECOMPOSE,
             )
             outbound = with_consensus_status(format_consensus_status(result, covered_ratio), final)
             logger.info("Thrivemind on_message sending fallback writer response to %s", target_room)

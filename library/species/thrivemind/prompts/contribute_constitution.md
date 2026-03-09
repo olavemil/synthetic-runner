@@ -6,6 +6,7 @@ Current constitution:
 {reflections_block}
 Propose exactly one new principle or refinement.
 Constraints:
+
 - Keep this limited to 1 line.
 - Maximum 18 words.
 - One sentence only.

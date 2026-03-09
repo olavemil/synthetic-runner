@@ -312,13 +312,23 @@ def recompose(
     context: str = "",
     model: str = "",
     max_tokens: int = 4096,
+    prompt_template: str = "",
 ) -> str:
     """Rewrite winning text through identity's voice.
 
     all_candidates provided → unified composition citing all candidates (Thrivemind style).
     all_candidates absent  → direct rewrite through identity's voice (Hecate style).
+    prompt_template: optional template with {winning_text} and {all_candidates} placeholders.
     """
-    if all_candidates:
+    if prompt_template:
+        # Use provided template
+        if all_candidates:
+            snippets = "\n".join(f"- {text}" for text in all_candidates.values())
+            prompt = prompt_template.replace("{winning_text}", winning_text).replace("{all_candidates}", snippets)
+        else:
+            prompt = prompt_template.replace("{winning_text}", winning_text)
+    elif all_candidates:
+        # Default Thrivemind-style prompt
         snippets = "\n".join(f"- {text}" for text in all_candidates.values())
         prompt = (
             f"Winning candidate:\n{winning_text}\n\n"
@@ -326,6 +336,7 @@ def recompose(
             "Write the final, unified reply."
         )
     else:
+        # Default Hecate-style prompt
         prompt = f"Rewrite this response in your own voice and style:\n\n{winning_text}"
 
     return generate_with_identity(

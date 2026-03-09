@@ -6,6 +6,7 @@ Proposed principles:
 
 Refine the principles into a new constitution.
 Constraints:
+
 - Output only the final constitution text.
 - Start directly with the constitution, no preface.
 - Do not include thinking, analysis, or meta commentary.

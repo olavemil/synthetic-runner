@@ -3,4 +3,4 @@ The colony has received new messages. As a member of the Thrivemind collective, 
 Recent conversation:
 {conversation}
 
-Propose a thoughtful reply (50-150 words) that addresses these messages while maintaining our colony's voice and purpose.
+Propose a thoughtful but brief reply (50-150 words) that addresses these messages while maintaining our colony's voice and purpose. Avoid repeating conversation history verbatim, or appending your personal thinking.
