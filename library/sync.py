@@ -46,6 +46,54 @@ def _init_data_repo(repo_path: Path, branch: str) -> None:
     logger.info("Initialized data repo at %s", repo_path)
 
 
+def _write_index_files(out_dir: Path) -> int:
+    """Generate index.md files for each instance directory.
+
+    Returns number of files written (only counts changed files).
+    """
+    written = 0
+
+    for instance_dir in sorted(out_dir.iterdir()):
+        if not instance_dir.is_dir() or instance_dir.name.startswith("."):
+            continue
+
+        md_files = sorted(instance_dir.rglob("*.md"))
+        md_files = [f for f in md_files if f.name != "index.md"]
+        if not md_files:
+            continue
+
+        lines = [
+            "---",
+            f'title: "{instance_dir.name}"',
+            "---",
+            "",
+            f"# {instance_dir.name}",
+            "",
+        ]
+        for md_file in md_files:
+            rel = md_file.relative_to(instance_dir)
+            display = rel.stem.replace("_", " ").replace("-", " ").title()
+            link = str(rel.with_suffix(""))
+            lines.append(f"- [{display}]({link})")
+
+        content = "\n".join(lines) + "\n"
+        index_path = instance_dir / "index.md"
+        if index_path.exists() and index_path.read_text() == content:
+            continue
+        index_path.write_text(content)
+        written += 1
+
+    return written
+
+
+def _add_frontmatter(content: str, stem: str) -> str:
+    """Add Jekyll frontmatter if not already present."""
+    if content.startswith("---\n"):
+        return content
+    title = stem.replace("_", " ").replace("-", " ").title()
+    return f"---\ntitle: \"{title}\"\n---\n\n{content}"
+
+
 def sync_instances(
     instances_dir: Path,
     repo_path: Path,
@@ -96,7 +144,7 @@ def sync_instances(
     # Determine output directory
     out_dir = repo_path / prefix if prefix else repo_path
 
-    # Copy .md files
+    # Copy .md and .json files
     copied = 0
     for instance_dir in sorted(instances_dir.iterdir()):
         if not instance_dir.is_dir():
@@ -106,18 +154,28 @@ def sync_instances(
             continue
 
         instance_id = instance_dir.name
-        for md_file in memory_dir.rglob("*.md"):
-            rel = md_file.relative_to(memory_dir)
+        # Collect both .md and .json files
+        files_to_copy = list(memory_dir.rglob("*.md")) + list(memory_dir.rglob("*.json"))
+        for source_file in sorted(files_to_copy):
+            rel = source_file.relative_to(memory_dir)
             dest = out_dir / instance_id / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
 
             # Only copy if content differs
-            new_content = md_file.read_text(errors="replace")
+            raw_content = source_file.read_text(errors="replace")
+            # Only add frontmatter for markdown files
+            if source_file.suffix == ".md":
+                new_content = _add_frontmatter(raw_content, rel.stem)
+            else:
+                new_content = raw_content
             if dest.exists() and dest.read_text(errors="replace") == new_content:
                 continue
 
             dest.write_text(new_content)
             copied += 1
+
+    # Generate index files for navigation
+    copied += _write_index_files(out_dir)
 
     if copied == 0:
         logger.info("No changes to sync")

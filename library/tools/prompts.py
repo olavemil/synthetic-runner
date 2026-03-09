@@ -30,13 +30,29 @@ def read_memory(ctx: InstanceContext) -> dict[str, str]:
     return memory
 
 
-def format_events(events: list[Event]) -> str:
-    """Format events for prompt injection."""
+def get_entity_id(ctx: InstanceContext) -> str:
+    """Return the entity_id for the instance, or empty string if not configured."""
+    try:
+        return ctx.config("entity_id") or ""
+    except (KeyError, AttributeError):
+        return ""
+
+
+def format_events(events: list[Event], self_entity_id: str = "") -> str:
+    """Format events for prompt injection.
+
+    When *self_entity_id* is provided, messages from that sender are
+    labelled ``(you)`` so the LLM can distinguish its own prior replies
+    from external messages.
+    """
     if not events:
         return "(no new events)"
     lines = []
     for evt in events:
-        lines.append(f"[{evt.sender}] {evt.body}")
+        if self_entity_id and evt.sender == self_entity_id:
+            lines.append(f"[{evt.sender} (you)] {evt.body}")
+        else:
+            lines.append(f"[{evt.sender}] {evt.body}")
     return "\n".join(lines)
 
 

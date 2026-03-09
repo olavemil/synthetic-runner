@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from library.species import Species, SpeciesManifest, EntryPoint
 from library.tools.pipeline import run_pipeline, load_pipeline
-from library.tools.prompts import format_events
+from library.tools.prompts import format_events, get_entity_id
 
 if TYPE_CHECKING:
     from library.harness.adapters import Event
@@ -88,7 +88,7 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
     if not events:
         return
 
-    events_text = format_events(events)
+    events_text = format_events(events, self_entity_id=get_entity_id(ctx))
     dreams = ctx.read("dreams.md") or ""
     concerns = ctx.read("concerns.md") or ""
     thinking = ctx.read("thinking.md") or ""

@@ -34,7 +34,12 @@ class Checker:
     """
     Polls messaging adapters and checks cron schedules.
 
+    Events are stored in a persistent inbox in SQLite, independent of job
+    state.  The worker reads and clears the inbox at job start, so events
+    can never be lost even if a job is already running.
+
     State persisted in SQLite (checker namespace):
+      pending_events: {instance_id} -> list[dict]  (event inbox)
       sync_tokens:    {instance_id}:{space_name} -> token
       schedule_next:  {instance_id}:{entry_point} -> next_fire_timestamp
       idle_counts:    {instance_id} -> int (heartbeats since last message)
@@ -70,6 +75,7 @@ class Checker:
         with pending messages will never have a heartbeat enqueued instead.
         """
         instances = self._registry.list_instances()
+        logger.debug("Checker cycle: found instances=%s", [i.instance_id for i in instances])
         logger.info("Checker cycle started (instances=%d)", len(instances))
         reactive_instances: set[str] = set()
 
@@ -173,6 +179,9 @@ class Checker:
                 logger.exception("Error polling %s/%s", instance_id, space_name)
 
         if got_messages:
+            # Append events to the persistent inbox — always succeeds
+            self._append_pending_events(instance_id, pending_events)
+
             counter_key = f"external_count:{instance_id}"
             try:
                 prior_count = int(self._store.get(counter_key) or 0)
@@ -181,29 +190,51 @@ class Checker:
             new_count = prior_count + len(pending_events)
             self._store.put(counter_key, new_count)
             logger.info(
-                "Recorded external messages for %s (delta=%d total=%d)",
+                "Recorded external messages for %s (delta=%d total=%d inbox=%d)",
                 instance_id,
                 len(pending_events),
                 new_count,
+                len(self._load_pending_events(instance_id)),
             )
-            if not self._queue.has_active(instance_id):
-                payload = {"events": self._serialize_events(pending_events)}
-                job_id = self._queue.enqueue(instance_id, "on_message", payload)
-                if job_id:
-                    logger.info(
-                        "Enqueued on_message for %s (job %s, events=%d)",
-                        instance_id,
-                        job_id,
-                        len(pending_events),
-                    )
-                    enqueued = True
-                # Reset idle and thinks-since-reply counters on new messages
-                self._store.put(f"idle:{instance_id}", 0)
-                self._store.put(f"thinks_since_reply:{instance_id}", 0)
-            else:
-                logger.info("Skipping on_message enqueue for %s; active job already exists", instance_id)
+
+            # Ensure a job exists to process the inbox
+            enqueued = self._ensure_job(instance_id, "on_message")
+
+            # Reset idle and thinks-since-reply counters on new messages
+            self._store.put(f"idle:{instance_id}", 0)
+            self._store.put(f"thinks_since_reply:{instance_id}", 0)
 
         return got_messages, enqueued
+
+    def _ensure_job(self, instance_id: str, entry_point: str) -> bool:
+        """Ensure instance has an active job that includes the given entry point.
+
+        Returns True if a job was enqueued or an existing one was updated.
+        """
+        has_active = self._queue.has_active(instance_id)
+        logger.debug("%s.%s has_active=%s", instance_id, entry_point, has_active)
+        if not has_active:
+            payload = {"heartbeat": True} if entry_point == "heartbeat" else {}
+            job_id = self._queue.enqueue(instance_id, entry_point, payload)
+            if job_id:
+                logger.info("Enqueued %s.%s (job %s)", instance_id, entry_point, job_id)
+                return True
+            logger.warning("Failed to enqueue %s.%s (returned None)", instance_id, entry_point)
+            return False
+
+        # Job exists — try to merge entry point into it (only works if pending)
+        merge_payload = {"heartbeat": True} if entry_point == "heartbeat" else None
+        if self._queue.merge_into_pending(instance_id, entry_point, merge_payload):
+            logger.info("Merged %s.%s into pending job", instance_id, entry_point)
+            return True
+
+        # Job is running — that's fine. Events are in the inbox and will be
+        # picked up by the next job after this one completes.
+        logger.debug(
+            "Job running for %s; %s will be handled next cycle",
+            instance_id, entry_point,
+        )
+        return False
 
     def _resolve_entity_id(self, instance_config: InstanceConfig, adapter) -> str:
         """Resolve sender identity used to filter out self-generated events."""
@@ -244,16 +275,52 @@ class Checker:
         return ""
 
     # ------------------------------------------------------------------
+    # Persistent event inbox
+    # ------------------------------------------------------------------
+
+    def _append_pending_events(self, instance_id: str, events: list[Event]) -> None:
+        """Append events to the persistent inbox for an instance."""
+        key = f"pending_events:{instance_id}"
+        existing = self._store.get(key)
+        if not isinstance(existing, list):
+            existing = []
+        existing.extend(self._serialize_events(events))
+        self._store.put(key, existing)
+
+    def _load_pending_events(self, instance_id: str) -> list[dict]:
+        """Load the raw pending events for an instance."""
+        raw = self._store.get(f"pending_events:{instance_id}")
+        if isinstance(raw, list):
+            return raw
+        return []
+
+    @staticmethod
+    def drain_pending_events(store: NamespacedStore, instance_id: str) -> list[dict]:
+        """Read and clear the event inbox for an instance.
+
+        Called by the worker at job start.  Returns serialized event dicts.
+        """
+        key = f"pending_events:{instance_id}"
+        raw = store.get(key)
+        if not isinstance(raw, list) or not raw:
+            return []
+        store.delete(key)
+        return raw
+
+    # ------------------------------------------------------------------
     # Schedule checking
     # ------------------------------------------------------------------
 
     def _check_schedules(self, reactive_instances: set[str]) -> set[str]:
         now = time.time()
         scheduled_instances: set[str] = set()
+        all_instances = self._registry.list_instances()
+        logger.debug("Checking schedules for instances: %s", [ic.instance_id for ic in all_instances])
 
-        for instance_config in self._registry.list_instances():
+        for instance_config in all_instances:
             instance_id = instance_config.instance_id
             manifest = self._registry.get_manifest(instance_config.species)
+            logger.debug("Evaluating schedules for %s (species=%s)", instance_id, instance_config.species)
 
             # Collect all scheduled entry points from manifest + instance overrides
             schedule_map: dict[str, str] = {}
@@ -264,6 +331,11 @@ class Checker:
             for ep_name, value in instance_config.schedule.items():
                 if isinstance(value, str):
                     schedule_map[ep_name] = value
+
+            logger.debug("%s collected schedule_map from manifest+instance: %s", instance_id, schedule_map)
+            if not schedule_map:
+                logger.debug("%s has no schedules configured, skipping schedule check", instance_id)
+                continue
 
             max_idle = instance_config.schedule.get("max_idle_heartbeats")
             if max_idle is not None:
@@ -278,24 +350,31 @@ class Checker:
             except (ValueError, TypeError):
                 max_thinks = 1
 
+            logger.debug("%s schedule_map keys: %s", instance_id, list(schedule_map.keys()))
             for ep_name, cron_expr in schedule_map.items():
                 key = f"schedule_next:{instance_id}:{ep_name}"
                 next_fire = self._store.get(key)
 
                 if next_fire is None:
                     cron = croniter(cron_expr, now)
-                    self._store.put(key, cron.get_next(float))
+                    next_scheduled = cron.get_next(float)
+                    self._store.put(key, next_scheduled)
+                    logger.debug("%s.%s initialized (cron=%s, next_fire=%.1f)", instance_id, ep_name, cron_expr, next_scheduled)
                     continue
 
                 if now < next_fire:
+                    logger.debug("%s.%s not ready (now=%.1f < next_fire=%.1f, gap=%.1f sec)", instance_id, ep_name, now, next_fire, next_fire - now)
                     continue
 
                 # Advance to next fire time
                 cron = croniter(cron_expr, now)
-                self._store.put(key, cron.get_next(float))
+                next_scheduled = cron.get_next(float)
+                self._store.put(key, next_scheduled)
+                logger.info("%s.%s fired (cron=%s, next_fire=%.1f)", instance_id, ep_name, cron_expr, next_scheduled)
 
                 if instance_id not in reactive_instances:
                     # Idle throttle: cap consecutive idle heartbeats
+                    throttled = False
                     if max_idle is not None:
                         idle_key = f"idle:{instance_id}"
                         idle_count = self._store.get(idle_key) or 0
@@ -304,11 +383,12 @@ class Checker:
                                 "Skipping %s.%s (idle=%d >= max_idle=%d)",
                                 instance_id, ep_name, idle_count, max_idle,
                             )
-                            continue
-                        self._store.put(idle_key, idle_count + 1)
+                            throttled = True
+                        else:
+                            self._store.put(idle_key, idle_count + 1)
 
                     # Thinks-per-reply throttle: cap heartbeats between replies
-                    if max_thinks is not None:
+                    if not throttled and max_thinks is not None:
                         thinks_key = f"thinks_since_reply:{instance_id}"
                         thinks_count = self._store.get(thinks_key) or 0
                         if thinks_count >= max_thinks:
@@ -316,22 +396,27 @@ class Checker:
                                 "Skipping %s.%s (thinks_since_reply=%d >= max_thinks_per_reply=%d)",
                                 instance_id, ep_name, thinks_count, max_thinks,
                             )
-                            continue
-                        self._store.put(thinks_key, thinks_count + 1)
+                            throttled = True
+                        else:
+                            self._store.put(thinks_key, thinks_count + 1)
 
-                # Enqueue if not already active
-                if not self._queue.has_active(instance_id):
-                    job_id = self._queue.enqueue(instance_id, ep_name, {})
-                    if job_id:
-                        logger.info(
-                            "Enqueued %s.%s (job %s)", instance_id, ep_name, job_id
-                        )
-                        scheduled_instances.add(instance_id)
-                else:
-                    logger.debug(
-                        "Skipping %s.%s — instance already has active job",
-                        instance_id, ep_name,
-                    )
+                    # If heartbeat is throttled, check for pending messages instead
+                    if throttled:
+                        pending_key = f"pending_events:{instance_id}"
+                        pending = self._store.get(pending_key)
+                        if isinstance(pending, list) and pending:
+                            logger.info(
+                                "%s.%s throttled but has pending messages (count=%d), enqueueing on_message",
+                                instance_id, ep_name, len(pending),
+                            )
+                            self._ensure_job(instance_id, "on_message")
+                        continue
+
+                # Enqueue or merge into existing pending job
+                ensured = self._ensure_job(instance_id, ep_name)
+                logger.debug("%s.%s ensure_job returned: %s", instance_id, ep_name, ensured)
+                if ensured:
+                    scheduled_instances.add(instance_id)
 
         return scheduled_instances
 

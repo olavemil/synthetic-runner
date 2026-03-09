@@ -19,7 +19,7 @@ from library.tools.hecate import (
     _build_memory_context,
 )
 from library.tools.deliberate import generate_with_identity, think_with_context
-from library.tools.prompts import format_events
+from library.tools.prompts import format_events, get_entity_id
 
 if TYPE_CHECKING:
     from library.harness.adapters import Event
@@ -75,7 +75,8 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
 
     shared_memory = load_shared_memory(ctx)
     context = _build_memory_context(shared_memory)
-    full_prompt = format_events(events)
+    entity_id = get_entity_id(ctx)
+    full_prompt = format_events(events, self_entity_id=entity_id)
     events_with_room = [evt for evt in events if evt.room]
     if events_with_room:
         target_event = max(events_with_room, key=lambda evt: evt.timestamp)
@@ -92,7 +93,7 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
         target_room = cfg.voice_space
         room_events = events
 
-    room_prompt = format_events(room_events) if room_events else full_prompt
+    room_prompt = format_events(room_events, self_entity_id=entity_id) if room_events else full_prompt
     suggestions: list[tuple[str, str]] = []
     for voice in cfg.voices:
         suggestion_prompt = (

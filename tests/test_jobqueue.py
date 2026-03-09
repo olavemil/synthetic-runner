@@ -120,3 +120,61 @@ class TestCounts:
         assert len(pending) == 2
         instance_ids = {j.instance_id for j in pending}
         assert instance_ids == {"inst-a", "inst-b"}
+
+
+class TestMergeIntoPending:
+    def test_merge_heartbeat_into_pending_on_message(self, queue):
+        queue.enqueue("inst-a", "on_message", {"events": [{"body": "hi"}]})
+        merged = queue.merge_into_pending("inst-a", "heartbeat", {"heartbeat": True})
+        assert merged is True
+
+        job = queue.claim_next("worker-1")
+        assert "on_message" in job.payload["entry_points"]
+        assert "heartbeat" in job.payload["entry_points"]
+        assert job.payload["heartbeat"] is True
+        assert len(job.payload["events"]) == 1
+
+    def test_merge_events_into_pending_heartbeat(self, queue):
+        queue.enqueue("inst-a", "heartbeat", {"heartbeat": True})
+        merged = queue.merge_into_pending(
+            "inst-a", "on_message", {"events": [{"body": "hello"}]}
+        )
+        assert merged is True
+
+        job = queue.claim_next("worker-1")
+        assert "heartbeat" in job.payload["entry_points"]
+        assert "on_message" in job.payload["entry_points"]
+        assert len(job.payload["events"]) == 1
+
+    def test_merge_appends_events(self, queue):
+        queue.enqueue("inst-a", "on_message", {"events": [{"body": "first"}]})
+        queue.merge_into_pending("inst-a", "on_message", {"events": [{"body": "second"}]})
+
+        job = queue.claim_next("worker-1")
+        assert len(job.payload["events"]) == 2
+        assert job.payload["events"][0]["body"] == "first"
+        assert job.payload["events"][1]["body"] == "second"
+
+    def test_merge_fails_when_no_active_job(self, queue):
+        merged = queue.merge_into_pending("inst-a", "heartbeat", {"heartbeat": True})
+        assert merged is False
+
+    def test_merge_fails_when_job_is_running(self, queue):
+        queue.enqueue("inst-a", "on_message", {})
+        queue.claim_next("worker-1")
+        merged = queue.merge_into_pending("inst-a", "heartbeat", {"heartbeat": True})
+        assert merged is False
+
+    def test_merge_does_not_duplicate_entry_points(self, queue):
+        queue.enqueue("inst-a", "on_message", {"events": [{"body": "hi"}]})
+        queue.merge_into_pending("inst-a", "on_message", {"events": [{"body": "again"}]})
+
+        job = queue.claim_next("worker-1")
+        assert job.payload["entry_points"].count("on_message") == 1
+
+    def test_is_running(self, queue):
+        assert not queue.is_running("inst-a")
+        queue.enqueue("inst-a", "on_message", {})
+        assert not queue.is_running("inst-a")
+        queue.claim_next("worker-1")
+        assert queue.is_running("inst-a")

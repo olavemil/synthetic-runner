@@ -63,7 +63,9 @@ class TestSyncInstances:
     def test_content_matches(self, instances_dir, data_repo):
         sync_instances(instances_dir, data_repo, push=False)
 
-        assert (data_repo / "alpha" / "thinking.md").read_text() == "# Thoughts\nSome deep thinking."
+        content = (data_repo / "alpha" / "thinking.md").read_text()
+        assert "# Thoughts\nSome deep thinking." in content
+        assert content.startswith("---\ntitle:")
 
     def test_no_changes_returns_false(self, instances_dir, data_repo):
         sync_instances(instances_dir, data_repo, push=False)
@@ -79,7 +81,8 @@ class TestSyncInstances:
 
         changed = sync_instances(instances_dir, data_repo, push=False)
         assert changed is True
-        assert (data_repo / "alpha" / "thinking.md").read_text() == "# Updated thoughts"
+        content = (data_repo / "alpha" / "thinking.md").read_text()
+        assert "# Updated thoughts" in content
 
     def test_detects_new_files(self, instances_dir, data_repo):
         sync_instances(instances_dir, data_repo, push=False)

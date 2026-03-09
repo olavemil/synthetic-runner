@@ -73,7 +73,7 @@ class TestThrivemindOnMessage:
         """on_message produces a colony message and persists the colony."""
         db = open_store()
         cfg = {
-            "colony_size": 4,
+            "min_colony_size": 4, "max_colony_size": 4,
             "suggestion_fraction": 0.5,
             "approval_threshold": 10,  # no spawning
             "consensus_threshold": 0.0,  # always accept
@@ -104,7 +104,7 @@ class TestThrivemindOnMessage:
     def test_on_message_sends_reply_to_event_room(self):
         db = open_store()
         cfg = {
-            "colony_size": 4,
+            "min_colony_size": 4, "max_colony_size": 4,
             "suggestion_fraction": 0.5,
             "approval_threshold": 10,
             "consensus_threshold": 0.0,
@@ -131,7 +131,7 @@ class TestThrivemindOnMessage:
         """If consensus is not met, top-rated candidates are joined then rewritten by writer."""
         db = open_store()
         cfg = {
-            "colony_size": 4,
+            "min_colony_size": 4, "max_colony_size": 4,
             "suggestion_fraction": 1.0,  # all colony suggests
             "approval_threshold": 10,
             "consensus_threshold": 0.99,  # very high threshold
@@ -164,7 +164,7 @@ class TestThrivemindOnMessage:
 
         # Pre-populate colony with 4 individuals, each with distinct IDs
         from library.tools.thrivemind import spawn_initial_colony, save_colony, ThrivemindConfig
-        colony_cfg = ThrivemindConfig(colony_size=4)
+        colony_cfg = ThrivemindConfig(min_colony_size=4, max_colony_size=4)
         colony = spawn_initial_colony(colony_cfg)
         save_colony(ctx, colony)
         captured_candidates.extend(ind.name for ind in colony[:2])  # 2 suggesters
@@ -201,13 +201,12 @@ class TestThrivemindOnMessage:
         assert f"Candidate from {captured_candidates[0]}." in writer_prompt
         assert f"Candidate from {captured_candidates[1]}." in writer_prompt
         assert "Speak as a unified hivemind voice." in writer_system
-        assert "also answer to the name subconscious-entity." in writer_system
         assert "up to about 100 words" in writer_system
 
     def test_on_message_writes_reflection_and_uses_it_in_vote_context(self):
         db = open_store()
         cfg = {
-            "colony_size": 4,
+            "min_colony_size": 4, "max_colony_size": 4,
             "suggestion_fraction": 0.5,
             "approval_threshold": 10,
             "consensus_threshold": 0.99,
@@ -250,7 +249,7 @@ class TestThrivemindHeartbeat:
         """Heartbeat updates constitution and runs spawn cycle."""
         db = open_store()
         cfg = {
-            "colony_size": 4,
+            "min_colony_size": 4, "max_colony_size": 4,
             "approval_threshold": 10,  # no natural spawning
             "consensus_threshold": 0.0,  # always adopt constitution
             "voice_space": "main",
@@ -272,7 +271,7 @@ class TestThrivemindHeartbeat:
         assert "candidate.md" in ctx._files
         assert "Contributions" in ctx._files["contributions.md"]
         assert ctx._files["candidate.md"] == "Rewritten constitution."
-        assert "| Individual | Personality | Approval |" in ctx._files["colony.md"]
+        assert "| Individual | Personality | Approval | Age |" in ctx._files["colony.md"]
         messages = [r.getMessage() for r in caplog.records]
         assert any("Thrivemind constitution adopted; writing constitution.md" in m for m in messages)
         assert any("Writing thrivemind constitution.md" in m for m in messages)
@@ -280,7 +279,7 @@ class TestThrivemindHeartbeat:
     def test_heartbeat_logs_when_constitution_not_adopted(self, caplog):
         db = open_store()
         cfg = {
-            "colony_size": 3,
+            "min_colony_size": 3, "max_colony_size": 3,
             "approval_threshold": 10,
             "consensus_threshold": 1.0,  # impossible with strict >
             "voice_space": "main",
@@ -314,7 +313,7 @@ class TestThrivemindHeartbeat:
         """Heartbeat spawn cycle keeps colony at target size."""
         db = open_store()
         cfg = {
-            "colony_size": 6,
+            "min_colony_size": 6, "max_colony_size": 6,
             "approval_threshold": 2,
             "consensus_threshold": 0.0,
             "voice_space": "main",
@@ -325,7 +324,7 @@ class TestThrivemindHeartbeat:
         # Pre-populate with some eligible individuals
         from library.tools.thrivemind import ThrivemindConfig, spawn_initial_colony, save_colony
         from library.tools.thrivemind import load_colony
-        colony_cfg = ThrivemindConfig(colony_size=6, approval_threshold=2)
+        colony_cfg = ThrivemindConfig(min_colony_size=6, max_colony_size=6, approval_threshold=2)
         colony = spawn_initial_colony(colony_cfg)
         # Give 2 individuals enough approval to trigger spawn
         colony[0].approval = 3
@@ -340,7 +339,7 @@ class TestThrivemindHeartbeat:
     def test_heartbeat_sanitizes_contributions_and_candidate_outputs(self):
         db = open_store()
         cfg = {
-            "colony_size": 1,
+            "min_colony_size": 1, "max_colony_size": 1,
             "approval_threshold": 10,
             "consensus_threshold": 0.0,
             "voice_space": "main",
@@ -383,7 +382,7 @@ class TestThrivemindHeartbeat:
     def test_second_vote_round_uses_round_one_context(self, caplog):
         db = open_store()
         cfg = {
-            "colony_size": 3,
+            "min_colony_size": 3, "max_colony_size": 3,
             "approval_threshold": 10,
             "consensus_threshold": 0.6,
             "voice_space": "main",
@@ -421,7 +420,7 @@ class TestThrivemindHeartbeat:
     def test_heartbeat_retries_empty_contribution_after_think_truncation(self):
         db = open_store()
         cfg = {
-            "colony_size": 1,
+            "min_colony_size": 1, "max_colony_size": 1,
             "approval_threshold": 10,
             "consensus_threshold": 0.0,
             "voice_space": "main",

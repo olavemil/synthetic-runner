@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 
 from library.harness.adapters import Event
+from library.harness.checker import Checker
 from library.harness.config import HarnessConfig, ProviderConfig
 from library.harness.context import InstanceContext
 from library.harness.jobqueue import Job, JobQueue
@@ -57,11 +58,20 @@ class Worker:
 
     def run(self) -> None:
         """Drain the queue run-to-empty using threads for parallelism."""
+        # Clean up stale guards from crashed workers (jobs stuck for >1 hour)
+        stale_cleaned = self._queue.cleanup_stale_guards(max_age_seconds=3600)
+        if stale_cleaned:
+            logger.info("Cleaned up %d stale job guard(s)", stale_cleaned)
+
         pending_jobs = self._queue.list_pending()
         pending_instances = sorted({job.instance_id for job in pending_jobs})
         logger.info(
             "Worker cycle started (enqueued_instances=%s)",
             ",".join(pending_instances) if pending_instances else "-",
+        )
+        logger.debug(
+            "Pending jobs breakdown: %s",
+            {inst: len([j for j in pending_jobs if j.instance_id == inst]) for inst in pending_instances}
         )
         threads = []
         claimed_jobs = 0
@@ -72,8 +82,11 @@ class Worker:
                 can_run=self._can_run,
             )
             if job is None:
+                logger.debug("No more jobs to claim (claimed_jobs=%d)", claimed_jobs)
                 break
             claimed_jobs += 1
+            logger.debug("Claimed job for %s (job_id=%s, entry_point=%s, can_run=%s)", 
+                        job.instance_id, job.job_id, job.entry_point, self._can_run(job.instance_id))
 
             provider_id = self._get_provider_id(job.instance_id)
             slot_key = self._claim_provider_slot(provider_id)
@@ -105,36 +118,62 @@ class Worker:
         try:
             config = self._registry.get_instance_config(job.instance_id)
             ctx = self._build_context(config)
-            handler = self._registry.get_handler(job.instance_id, job.entry_point)
             payload = dict(job.payload or {})
-            if job.entry_point == "on_message" and "events" not in payload:
-                logger.warning(
-                    "on_message payload missing events; defaulting to empty list (%s.%s, job %s, payload_keys=%s)",
-                    job.instance_id,
-                    job.entry_point,
-                    job.job_id,
-                    ",".join(sorted(payload.keys())) if payload else "-",
-                )
-                payload["events"] = []
-            heartbeat_gate_used, heartbeat_external_count = self._configure_send_policy(ctx, job, payload)
-            logger.info(
-                "Running %s.%s (job %s, payload_keys=%s, events=%s)",
-                job.instance_id,
-                job.entry_point,
-                job.job_id,
-                ",".join(sorted(payload.keys())) if payload else "-",
-                len(payload["events"]) if isinstance(payload.get("events"), list) else "-",
+            entry_points = payload.pop("entry_points", [job.entry_point])
+
+            # Drain the persistent event inbox (written by checker)
+            inbox_events_raw = Checker.drain_pending_events(
+                self._checker_store, job.instance_id
             )
-            if "events" in payload and isinstance(payload["events"], list):
-                payload["events"] = [
-                    Event(**evt) if isinstance(evt, dict) else evt
-                    for evt in payload["events"]
-                ]
-            handler(ctx, **payload)
+            inbox_events = [
+                Event(**evt) if isinstance(evt, dict) else evt
+                for evt in inbox_events_raw
+            ]
+
+            has_heartbeat = bool(payload.pop("heartbeat", False)) or "heartbeat" in entry_points
+
+            # Build ordered phases: messages first, then heartbeat
+            phases: list[tuple[str, dict]] = []
+            if inbox_events or "on_message" in entry_points:
+                phases.append(("on_message", {"events": inbox_events}))
+            if has_heartbeat:
+                phases.append(("heartbeat", {}))
+
+            if not phases:
+                # Fallback: run the primary entry point as before
+                phases.append((job.entry_point, payload))
+
+            logger.info(
+                "Running %s (job %s, phases=%s, events=%d)",
+                job.instance_id,
+                job.job_id,
+                "+".join(ep for ep, _ in phases),
+                len(inbox_events),
+            )
+
+            for ep_name, ep_payload in phases:
+                handler = self._registry.get_handler(job.instance_id, ep_name)
+                heartbeat_gate_used_phase, heartbeat_external_count_phase = (
+                    self._configure_send_policy(ctx, job, ep_name, ep_payload)
+                )
+                if ep_name == "heartbeat":
+                    heartbeat_gate_used = heartbeat_gate_used_phase
+                    heartbeat_external_count = heartbeat_external_count_phase
+
+                logger.info(
+                    "Running phase %s.%s (job %s)",
+                    job.instance_id, ep_name, job.job_id,
+                )
+                handler(ctx, **ep_payload)
+                logger.info(
+                    "Completed phase %s.%s (job %s)",
+                    job.instance_id, ep_name, job.job_id,
+                )
+
         except Exception as exc:
             success = False
             failure_reason = f"{type(exc).__name__}: {exc}"
-            logger.exception("Error in %s.%s", job.instance_id, job.entry_point)
+            logger.exception("Error in %s", job.instance_id)
         finally:
             sent_count = self._coerce_int(getattr(ctx, "sent_message_count", 0) if ctx is not None else 0, 0)
             if ctx is not None and heartbeat_gate_used and sent_count > 0:
@@ -150,27 +189,25 @@ class Worker:
                 self._release_provider_slot(slot_key)
             if not success:
                 logger.error(
-                    "Failed %s.%s (job %s, reason=%s)",
+                    "Failed %s (job %s, reason=%s)",
                     job.instance_id,
-                    job.entry_point,
                     job.job_id,
                     failure_reason or "(unknown)",
                 )
             logger.info(
-                "Completed %s.%s (job %s, success=%s)",
+                "Completed %s (job %s, success=%s)",
                 job.instance_id,
-                job.entry_point,
                 job.job_id,
                 success,
             )
 
-    def _configure_send_policy(self, ctx: InstanceContext, job: Job, payload: dict) -> tuple[bool, int]:
-        """Configure per-job messaging limits.
+    def _configure_send_policy(self, ctx: InstanceContext, job: Job, entry_point: str, payload: dict) -> tuple[bool, int]:
+        """Configure per-phase messaging limits.
 
         Returns:
             (uses_heartbeat_gate, external_count_snapshot)
         """
-        if job.entry_point == "on_message":
+        if entry_point == "on_message":
             events = payload.get("events")
             event_count = len(events) if isinstance(events, list) else 0
             allow = event_count > 0
@@ -182,14 +219,14 @@ class Worker:
             logger.info(
                 "Configured send policy for %s.%s (allow=%s max_sends=%d events=%d)",
                 job.instance_id,
-                job.entry_point,
+                entry_point,
                 allow,
                 1 if allow else 0,
                 event_count,
             )
             return False, 0
 
-        if job.entry_point == "heartbeat":
+        if entry_point == "heartbeat":
             external_count = self._coerce_int(self._checker_store.get(f"external_count:{job.instance_id}"), 0)
             seen_count = self._coerce_int(self._checker_store.get(self._heartbeat_seen_key(job.instance_id)), 0)
             allow = external_count > seen_count
@@ -204,7 +241,7 @@ class Worker:
             logger.info(
                 "Configured send policy for %s.%s (allow=%s max_sends=%d external_count=%d seen=%d)",
                 job.instance_id,
-                job.entry_point,
+                entry_point,
                 allow,
                 1 if allow else 0,
                 external_count,
@@ -250,13 +287,16 @@ class Worker:
         provider_id = self._get_provider_id(instance_id)
         max_conc = self._get_max_concurrency(provider_id)
         if max_conc is None:
+            logger.debug("%s can_run=True (no concurrency limit for provider %s)", instance_id, provider_id)
             return True
 
         used = sum(
             1 for _, _, owner in self._slots_store.scan_items(f"{provider_id}:slot:")
             if owner is not None
         )
-        return used < max_conc
+        can_run = used < max_conc
+        logger.debug("%s can_run=%s (provider=%s, used=%d/%d slots)", instance_id, can_run, provider_id, used, max_conc)
+        return can_run
 
     def _claim_provider_slot(self, provider_id: str | None) -> str | None:
         if not provider_id:

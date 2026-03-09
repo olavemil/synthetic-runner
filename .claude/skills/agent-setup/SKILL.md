@@ -66,14 +66,15 @@ Persistent memory agent with gut-plan-compose response pipeline.
 **Config keys:** None beyond standard
 
 ### Thrivemind (`species: thrivemind`)
-Colony-based deliberation. A colony of individuals with personality dimensions proposes, votes, and converges on responses.
+Colony-based deliberation. A colony of individuals with personality dimensions proposes, votes, and converges on responses. Individuals have evocative adjective-adjective-noun names, track age (sessions since spawn), and receive relative age context during reflection.
 
 **Entry points:** `on_message` (reactive), `heartbeat` (scheduled, constitution updates + spawn cycle)
 **Default files:** `constitution.md`, `sessions.md`
 **Config keys:**
 ```yaml
 thrivemind:
-  colony_size: 12
+  min_colony_size: 8         # colony grows from this size
+  max_colony_size: 16        # colony is trimmed to this size
   suggestion_fraction: 0.5
   approval_threshold: 3
   consensus_threshold: 0.6
@@ -81,6 +82,10 @@ thrivemind:
   writer_model: ""           # provider/model for final composition
   voice_space: main
 ```
+
+**Voting:** Each voter ranks candidates; voters who placed the winner in their **top 2** picks give +1 approval to the winner. Voters whose top pick was not the winner lose -1. This dual-pick system makes positive approval more achievable.
+
+**Spawn cycle:** When colony is below max, eligible parents survive and offspring are added. At max, eligible parents are replaced by offspring. Colony is always kept within min/max bounds.
 
 ### Hecate (`species: hecate`)
 Multi-voice deliberation with named identity voices that think, vote, and compose responses.

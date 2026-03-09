@@ -19,7 +19,7 @@ from typing import Any, TYPE_CHECKING
 
 from library.species import Species, SpeciesManifest, EntryPoint
 from library.tools.pipeline import run_pipeline, load_pipeline
-from library.tools.prompts import format_events
+from library.tools.prompts import format_events, get_entity_id
 from library.tools.segments import (
     SegmentRegistry,
     load_registry,
@@ -573,7 +573,7 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
     logger.info("on_message starting (instance=%s, events=%d, senders=%s)",
                 ctx.instance_id, len(events), ", ".join(senders))
 
-    events_text = format_events(events)
+    events_text = format_events(events, self_entity_id=get_entity_id(ctx))
     thinking = ctx.read("thinking.md") or ""
     sleep_output = ctx.read("sleep.md") or ""
     rep_summary = _graph_map_summary(ctx)

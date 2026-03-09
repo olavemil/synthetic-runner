@@ -92,8 +92,8 @@ class TestWorkerRun:
 
         messages = [r.getMessage() for r in caplog.records]
         assert any("Worker cycle started (enqueued_instances=a,b)" in m for m in messages)
-        assert any("Completed a.on_message" in m for m in messages)
-        assert any("Completed b.on_message" in m for m in messages)
+        assert any("Completed a " in m and "success=True" in m for m in messages)
+        assert any("Completed b " in m and "success=True" in m for m in messages)
 
     def test_drains_queue(self):
         db = open_store()
@@ -131,7 +131,7 @@ class TestWorkerRun:
 
         assert not queue.has_active("a")
 
-    def test_rehydrates_serialized_events_payload_for_on_message(self):
+    def test_rehydrates_events_from_inbox(self):
         db = open_store()
         instances = [_make_instance("a")]
         captured = {}
@@ -141,21 +141,18 @@ class TestWorkerRun:
 
         worker = _build_worker(db, instances, handler=handler)
         queue = JobQueue(db)
-        queue.enqueue(
-            "a",
-            "on_message",
+
+        # Store events in the persistent inbox (as checker would)
+        worker._checker_store.put("pending_events:a", [
             {
-                "events": [
-                    {
-                        "event_id": "$evt",
-                        "sender": "@u:matrix.org",
-                        "body": "hello",
-                        "timestamp": 123,
-                        "room": "main",
-                    }
-                ]
-            },
-        )
+                "event_id": "$evt",
+                "sender": "@u:matrix.org",
+                "body": "hello",
+                "timestamp": 123,
+                "room": "main",
+            }
+        ])
+        queue.enqueue("a", "on_message")
 
         with patch.object(worker, "_build_context") as mock_ctx:
             mock_ctx.return_value = MagicMock()
@@ -168,12 +165,15 @@ class TestWorkerRun:
         assert events[0].event_id == "$evt"
         assert events[0].room == "main"
 
-    def test_on_message_defaults_missing_events_and_logs_warning(self, caplog):
+        # Inbox should be drained
+        assert worker._checker_store.get("pending_events:a") is None
+
+    def test_on_message_defaults_missing_events_to_empty_list(self):
         db = open_store()
         instances = [_make_instance("a")]
         captured = {}
 
-        def handler(ctx, events):  # noqa: ARG001
+        def handler(ctx, events=None):  # noqa: ARG001
             captured["events"] = events
 
         worker = _build_worker(db, instances, handler=handler)
@@ -182,12 +182,9 @@ class TestWorkerRun:
 
         with patch.object(worker, "_build_context") as mock_ctx:
             mock_ctx.return_value = MagicMock()
-            with caplog.at_level(logging.INFO):
-                worker.run()
+            worker.run()
 
         assert captured.get("events") == []
-        messages = [r.getMessage() for r in caplog.records]
-        assert any("on_message payload missing events; defaulting to empty list" in m for m in messages)
 
     def test_logs_failure_reason_summary_on_handler_error(self, caplog):
         db = open_store()
@@ -206,8 +203,8 @@ class TestWorkerRun:
                 worker.run()
 
         messages = [r.getMessage() for r in caplog.records]
-        assert any("Failed a.heartbeat" in m and "ValueError: boom" in m for m in messages)
-        assert any("Completed a.heartbeat" in m and "success=False" in m for m in messages)
+        assert any("Failed a " in m and "ValueError: boom" in m for m in messages)
+        assert any("Completed a " in m and "success=False" in m for m in messages)
 
     def test_on_message_send_policy_allows_one_send_with_events(self):
         db = open_store()
@@ -229,22 +226,18 @@ class TestWorkerRun:
             captured["events"] = events
 
         worker = _build_worker(db, instances, handler=handler)
-        queue = JobQueue(db)
-        queue.enqueue(
-            "a",
-            "on_message",
+        # Store events in the persistent inbox
+        worker._checker_store.put("pending_events:a", [
             {
-                "events": [
-                    {
-                        "event_id": "$evt",
-                        "sender": "@u:matrix.org",
-                        "body": "hello",
-                        "timestamp": 123,
-                        "room": "main",
-                    }
-                ]
-            },
-        )
+                "event_id": "$evt",
+                "sender": "@u:matrix.org",
+                "body": "hello",
+                "timestamp": 123,
+                "room": "main",
+            }
+        ])
+        queue = JobQueue(db)
+        queue.enqueue("a", "on_message")
 
         with patch.object(worker, "_build_context", return_value=FakeCtx()):
             worker.run()
@@ -345,6 +338,64 @@ class TestWorkerRun:
         assert captured["policy"]["allow_send"] is True
         assert captured["policy"]["max_sends"] == 1
         assert worker._checker_store.get("send_gate_seen:a:heartbeat") == 5
+
+
+    def test_combined_job_runs_on_message_then_heartbeat(self):
+        db = open_store()
+        instances = [_make_instance("a")]
+        call_order = []
+
+        def on_message_handler(ctx, events=None):  # noqa: ARG001
+            call_order.append("on_message")
+
+        def heartbeat_handler(ctx):  # noqa: ARG001
+            call_order.append("heartbeat")
+
+        # Create species with separate handlers for on_message and heartbeat
+        manifest = SpeciesManifest(
+            species_id="test",
+            entry_points=[
+                EntryPoint(name="on_message", handler=on_message_handler, trigger="message", schedule=None),
+                EntryPoint(name="heartbeat", handler=heartbeat_handler, trigger=None, schedule="0 * * * *"),
+            ],
+            tools=[],
+            default_files={},
+            spawn=lambda ctx: None,
+        )
+        s = MagicMock(spec=Species)
+        s.manifest.return_value = manifest
+
+        harness_config = HarnessConfig(
+            providers=[ProviderConfig(id="default", type="openai_compat")],
+            adapters=[],
+        )
+        registry = Registry()
+        registry.register_species(s)
+        for inst in instances:
+            registry.register_instance(inst)
+        mock_provider = MagicMock()
+        worker = Worker(
+            harness_config=harness_config,
+            registry=registry,
+            providers={"default": mock_provider},
+            adapters={},
+            store_db=db,
+            base_dir="/tmp",
+        )
+
+        queue = JobQueue(db)
+        # Store events in the persistent inbox
+        worker._checker_store.put("pending_events:a", [
+            {"event_id": "$1", "sender": "@u:m", "body": "hi", "timestamp": 1, "room": "main"}
+        ])
+        queue.enqueue("a", "on_message")
+        queue.merge_into_pending("a", "heartbeat", {"heartbeat": True})
+
+        with patch.object(worker, "_build_context") as mock_ctx:
+            mock_ctx.return_value = MagicMock()
+            worker.run()
+
+        assert call_order == ["on_message", "heartbeat"]
 
 
 class TestProviderSlots:

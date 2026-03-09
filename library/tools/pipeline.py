@@ -60,8 +60,8 @@ def resolve_input(ctx: InstanceContext, source: str, pipeline_state: dict) -> An
         return pipeline_state.get("_events", [])
 
     if source == "events.formatted":
-        from library.tools.prompts import format_events
-        return format_events(pipeline_state.get("_events", []))
+        from library.tools.prompts import format_events, get_entity_id
+        return format_events(pipeline_state.get("_events", []), self_entity_id=get_entity_id(ctx))
 
     if source == "item":
         return pipeline_state.get("_foreach_item")

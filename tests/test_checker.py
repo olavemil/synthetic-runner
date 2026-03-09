@@ -21,7 +21,7 @@ from library.harness.config import (
 )
 from library.harness.jobqueue import JobQueue
 from library.harness.registry import Registry
-from library.harness.store import open_store
+from library.harness.store import open_store, NamespacedStore
 from library.species import Species, SpeciesManifest, EntryPoint
 
 
@@ -324,7 +324,7 @@ class TestCheckerReactive:
         # The schedule check passes because inst-1 is in reactive_instances
         assert queue.pending_count() == 1
 
-    def test_poll_instance_enqueues_on_message_with_serialized_events(self):
+    def test_poll_instance_enqueues_on_message_and_stores_events_in_inbox(self):
         db = open_store()
         species = _make_species(schedule="* * * * *")
         instance = _make_instance(with_messaging=True)
@@ -349,7 +349,7 @@ class TestCheckerReactive:
         )
         adapter = MagicMock()
         # First poll initializes token and should not enqueue.
-        # Second poll should enqueue on_message with event payload.
+        # Second poll should enqueue on_message and store events in inbox.
         adapter.poll.side_effect = [([evt], "tok1"), ([evt], "tok2")]
 
         with patch.object(checker, "_get_adapter", return_value=adapter):
@@ -363,11 +363,14 @@ class TestCheckerReactive:
 
         pending = queue.list_pending()
         assert len(pending) == 1
-        payload_events = pending[0].payload.get("events", [])
-        assert len(payload_events) == 1
-        assert payload_events[0]["event_id"] == "$evt1"
+
+        # Events are in the persistent inbox, not the job payload
+        checker_store = NamespacedStore(db, "checker")
+        inbox_events = Checker.drain_pending_events(checker_store, "inst-1")
+        assert len(inbox_events) == 1
+        assert inbox_events[0]["event_id"] == "$evt1"
         # Event room should be normalized to logical space name by checker.
-        assert payload_events[0]["room"] == "main"
+        assert inbox_events[0]["room"] == "main"
         assert checker._store.get("external_count:inst-1") == 1
 
     def test_poll_instance_resolves_missing_entity_id_via_adapter_and_filters_self(self):
@@ -417,11 +420,61 @@ class TestCheckerReactive:
         assert enqueued_2 is True
         pending = queue.list_pending()
         assert len(pending) == 1
-        payload_events = pending[0].payload.get("events", [])
-        assert len(payload_events) == 1
-        assert payload_events[0]["event_id"] == "$ext"
+
+        # Events are in the persistent inbox, not the job payload
+        checker_store = NamespacedStore(db, "checker")
+        inbox_events = Checker.drain_pending_events(checker_store, "inst-1")
+        assert len(inbox_events) == 1
+        assert inbox_events[0]["event_id"] == "$ext"
         assert checker._store.get("external_count:inst-1") == 1
         assert checker._resolved_entity_ids["inst-1"] == "@bot:matrix.org"
+
+    def test_events_survive_when_job_is_running(self):
+        """Events appended to the inbox are preserved even when a job is already running."""
+        db = open_store()
+        species = _make_species(schedule="* * * * *")
+        instance = _make_instance(with_messaging=True)
+        registry = Registry()
+        registry.register_species(species)
+        registry.register_instance(instance)
+
+        checker = Checker(
+            harness_config=_make_harness_config(adapter_type="matrix"),
+            registry=registry,
+            store_db=db,
+            base_dir=None,
+        )
+        queue = JobQueue(db)
+
+        evt1 = Event(event_id="$1", sender="@user:matrix.org", body="first", timestamp=1, room="!room:matrix.org")
+        evt2 = Event(event_id="$2", sender="@user:matrix.org", body="second", timestamp=2, room="!room:matrix.org")
+
+        adapter = MagicMock()
+        # Poll 1: init sync (skipped), Poll 2: first message, Poll 3: second message while running
+        adapter.poll.side_effect = [([evt1], "tok1"), ([evt1], "tok2"), ([evt2], "tok3")]
+
+        with patch.object(checker, "_get_adapter", return_value=adapter):
+            checker._poll_instance(instance)  # init sync
+            checker._poll_instance(instance)  # enqueues on_message, evt1 in inbox
+
+        # Simulate the worker claiming the job (now running)
+        job = queue.claim_next("worker-1")
+        assert job is not None
+
+        # Poll again while job is running — events should go to inbox
+        with patch.object(checker, "_get_adapter", return_value=adapter):
+            got_messages, enqueued = checker._poll_instance(instance)
+
+        assert got_messages is True
+        # Can't enqueue or merge (running), but events are safe in inbox
+        checker_store = NamespacedStore(db, "checker")
+        inbox = checker_store.get("pending_events:inst-1")
+        assert isinstance(inbox, list)
+        # evt1 was already drained by... wait, nobody drained it yet.
+        # Both evt1 and evt2 should be in the inbox.
+        event_ids = [e["event_id"] for e in inbox]
+        assert "$1" in event_ids
+        assert "$2" in event_ids
 
     def test_poll_instance_skips_reactive_events_when_entity_id_unknown(self, caplog):
         db = open_store()

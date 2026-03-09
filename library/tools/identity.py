@@ -35,6 +35,7 @@ class Identity:
     dims: dict[str, float] | None = None
     approval: int = 0
     created_at: int = field(default_factory=lambda: int(time.time()))
+    age: int = 0  # number of thinking sessions since spawn
 
 
 def format_persona(identity: Identity) -> str:
@@ -100,4 +101,5 @@ def load_identity(raw: dict) -> Identity:
         dims=dims,
         approval=int(raw.get("approval", 0)),
         created_at=int(raw.get("created_at", int(time.time()))),
+        age=int(raw.get("age", 0)),
     )

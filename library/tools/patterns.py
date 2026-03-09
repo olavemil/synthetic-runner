@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from library.tools.prompts import (
     read_memory,
+    get_entity_id,
     format_events,
     format_relationships_block,
     format_memory_context,
@@ -33,7 +34,8 @@ def gut_response(
     if memory is None:
         memory = read_memory(ctx)
 
-    events_text = format_events(events)
+    entity_id = get_entity_id(ctx)
+    events_text = format_events(events, self_entity_id=entity_id)
     memory_context = format_memory_context(memory, exclude=["sessions.md"])
     intentions = format_intentions_block(memory)
     subconscious = format_subconscious_block(memory)
@@ -101,8 +103,9 @@ def plan_response(
     rooms_section = ""
     if messages_by_room:
         parts = []
+        entity_id = get_entity_id(ctx)
         for room, msgs in messages_by_room.items():
-            msgs_text = format_events(msgs)
+            msgs_text = format_events(msgs, self_entity_id=entity_id)
             context = (room_contexts or {}).get(room, {})
             room_name = context.get("name", room)
             parts.append(f"### {room_name}\n{msgs_text}")
@@ -366,7 +369,7 @@ def distill_messages(ctx: InstanceContext, messages: list[Event]) -> str:
     if not messages:
         return ""
 
-    events_text = format_events(messages)
+    events_text = format_events(messages, self_entity_id=get_entity_id(ctx))
 
     system = "You are summarizing a conversation. Preserve key points and decisions."
 
@@ -526,9 +529,20 @@ def thinking_session(
     messages = [{"role": "user", "content": initial_message}]
 
     for _turn in range(max_turns):
+        # Reload thinking.md from disk so the LLM sees the current state
+        # (may have been compacted externally or grown via append_thinking)
+        current_thinking = ctx.read("thinking.md") or ""
+        if current_thinking:
+            word_count = len(current_thinking.split())
+            thinking_note = (
+                f"[Current thinking.md ({word_count} words)]\n{current_thinking}"
+            )
+        else:
+            thinking_note = "[thinking.md is empty]"
+
         response = ctx.llm(
             messages=messages,
-            system=system,
+            system=system + "\n\n" + thinking_note,
             tools=thinking_tools,
             max_tokens=max_tokens,
             caller="thinking_session",
@@ -554,10 +568,15 @@ def thinking_session(
                 existing = ctx.read("thinking.md") or ""
                 new_content = (existing + "\n\n" + tc.arguments.get("content", "")).strip()
                 ctx.write("thinking.md", new_content)
-                result = "Thoughts appended."
+                word_count = len(new_content.split())
+                result = f"Thoughts appended. thinking.md is now {word_count} words."
+                if word_count > 800:
+                    result += " Consider using replace_thinking to compact before it gets too long."
             elif tc.name == "replace_thinking":
-                ctx.write("thinking.md", tc.arguments.get("content", ""))
-                result = "Thinking replaced."
+                content = tc.arguments.get("content", "")
+                ctx.write("thinking.md", content)
+                word_count = len(content.split())
+                result = f"Thinking replaced. thinking.md is now {word_count} words."
             elif tc.name == "done":
                 is_done = True
                 result = tc.arguments.get("summary", "Done.")

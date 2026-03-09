@@ -107,7 +107,7 @@ class TestColonySnapshot:
         snapshot = build_colony_snapshot(colony)
 
         assert "# Colony" in snapshot
-        assert "| Individual | Personality | Approval |" in snapshot
+        assert "| Individual | Personality | Approval | Age |" in snapshot
         assert "| `b` |" in snapshot
         assert "| `a` |" in snapshot
         assert snapshot.index("| `b` |") < snapshot.index("| `a` |")
@@ -212,22 +212,34 @@ def _make_colony(approvals: list[int], cfg: ThrivemindConfig) -> list[Identity]:
 
 
 class TestRunSpawnCycle:
-    def test_colony_stays_at_target_size(self):
-        cfg = ThrivemindConfig(colony_size=6, approval_threshold=2)
+    def test_colony_stays_within_bounds(self):
+        cfg = ThrivemindConfig(min_colony_size=6, max_colony_size=6, approval_threshold=2)
         colony = _make_colony([0, 0, 0, 3, 4, 5], cfg)
         rng = random.Random(42)
         new_colony = run_spawn_cycle(colony, cfg, rng=rng)
-        assert len(new_colony) == cfg.colony_size
+        assert len(new_colony) == 6
+
+    def test_colony_grows_when_under_max(self):
+        cfg = ThrivemindConfig(min_colony_size=4, max_colony_size=8, approval_threshold=2)
+        colony = _make_colony([0, 0, 3, 4], cfg)
+        rng = random.Random(42)
+        new_colony = run_spawn_cycle(colony, cfg, rng=rng)
+        # Parents survive, offspring added
+        assert len(new_colony) > 4
+        assert len(new_colony) <= 8
+        # Original members still present
+        original_names = {ind.name for ind in colony}
+        assert original_names.issubset({ind.name for ind in new_colony})
 
     def test_no_eligible_returns_unchanged(self):
-        cfg = ThrivemindConfig(colony_size=4, approval_threshold=5)
+        cfg = ThrivemindConfig(min_colony_size=4, max_colony_size=4, approval_threshold=5)
         colony = _make_colony([0, 1, 2, 3], cfg)
         new_colony = run_spawn_cycle(colony, cfg)
         assert len(new_colony) == len(colony)
         assert {ind.name for ind in new_colony} == {ind.name for ind in colony}
 
     def test_offspring_have_zero_approval(self):
-        cfg = ThrivemindConfig(colony_size=4, approval_threshold=2)
+        cfg = ThrivemindConfig(min_colony_size=4, max_colony_size=6, approval_threshold=2)
         colony = _make_colony([0, 0, 3, 4], cfg)
         rng = random.Random(99)
         new_colony = run_spawn_cycle(colony, cfg, rng=rng)
@@ -236,8 +248,8 @@ class TestRunSpawnCycle:
             if ind.name not in original_names:
                 assert ind.approval == 0
 
-    def test_eligible_individuals_removed(self):
-        cfg = ThrivemindConfig(colony_size=4, approval_threshold=3)
+    def test_eligible_individuals_replaced_at_max(self):
+        cfg = ThrivemindConfig(min_colony_size=4, max_colony_size=4, approval_threshold=3)
         colony = _make_colony([0, 0, 4, 5], cfg)
         rng = random.Random(1)
         new_colony = run_spawn_cycle(colony, cfg, rng=rng)
@@ -246,7 +258,7 @@ class TestRunSpawnCycle:
         assert "3" not in new_names
 
     def test_dim_inheritance(self):
-        cfg = ThrivemindConfig(colony_size=2, approval_threshold=1)
+        cfg = ThrivemindConfig(min_colony_size=2, max_colony_size=2, approval_threshold=1)
         primary = Identity(
             name="parent",
             dims={n: 0.5 for n in AXIS_NAMES},
@@ -261,6 +273,17 @@ class TestRunSpawnCycle:
             for val in ind.dims.values():
                 assert -1.0 <= val <= 1.0
 
+    def test_names_are_evocative(self):
+        cfg = ThrivemindConfig(min_colony_size=4, max_colony_size=6, approval_threshold=2)
+        colony = _make_colony([3, 4, 0, 0], cfg)
+        rng = random.Random(42)
+        new_colony = run_spawn_cycle(colony, cfg, rng=rng)
+        original_names = {ind.name for ind in colony}
+        for ind in new_colony:
+            if ind.name not in original_names:
+                parts = ind.name.split("-")
+                assert len(parts) == 3, f"Expected adjective-adjective-noun, got: {ind.name}"
+
 
 # ---------------------------------------------------------------------------
 # update_approvals
@@ -274,22 +297,34 @@ class TestUpdateApprovals:
             for i, a in ids_approvals
         ]
 
-    def test_winner_gets_plus_one_per_first_place_voter(self):
+    def test_winner_gets_plus_one_per_top_two_voter(self):
         colony = self._colony([("a", 0), ("b", 0), ("c", 0)])
         votes = {
-            "a": ["b", "a", "c"],
-            "c": ["b", "c", "a"],
+            "a": ["b", "a", "c"],  # b in top 2 → +1
+            "c": ["c", "b", "a"],  # b in top 2 → +1
         }
         cfg = ThrivemindConfig()
         updated = update_approvals(colony, votes, "b", cfg)
         id_map = {ind.name: ind for ind in updated}
         assert id_map["b"].approval == 2
 
-    def test_non_winner_voter_loses_one(self):
-        colony = self._colony([("a", 0), ("b", 0)])
+    def test_voter_with_winner_in_second_pick_still_rewards(self):
+        """Top-2 voting: second pick for winner also gives +1."""
+        colony = self._colony([("a", 0), ("b", 0), ("c", 0)])
         votes = {
-            "a": ["a", "b"],
-            "b": ["b", "a"],
+            "a": ["c", "b", "a"],  # b is 2nd pick → still +1 for b
+        }
+        cfg = ThrivemindConfig()
+        updated = update_approvals(colony, votes, "b", cfg)
+        id_map = {ind.name: ind for ind in updated}
+        assert id_map["b"].approval == 1
+        assert id_map["a"].approval == 0  # voted for winner in top 2, no penalty
+
+    def test_non_winner_voter_loses_one(self):
+        colony = self._colony([("a", 0), ("b", 0), ("c", 0)])
+        votes = {
+            "a": ["a", "c", "b"],  # b not in top 2 → -1 for voter a
+            "b": ["b", "a"],       # b in top 2 → +1 for b
         }
         cfg = ThrivemindConfig()
         updated = update_approvals(colony, votes, "b", cfg)

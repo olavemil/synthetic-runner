@@ -7,3 +7,5 @@ Write a genuine response. Don't explain your internal process. Don't hedge unles
 {segment_identity}
 
 {segment_state}
+
+Be conscious of overall length
