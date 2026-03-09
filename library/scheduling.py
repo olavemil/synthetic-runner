@@ -61,8 +61,11 @@ def _launchd_plist(
     python: str,
     base_dir: str,
     config: str,
+    extra_args: list[str] | None = None,
 ) -> str:
     args = [python, "-m", "library", command, "--base-dir", base_dir, "--config", config]
+    if extra_args:
+        args.extend(extra_args)
     args_xml = "\n".join(f"        <string>{a}</string>" for a in args)
     return _LAUNCHD_PLIST.format(
         label=label,
@@ -81,6 +84,7 @@ def generate_launchd(
     work_interval: int,
     log_dir: str = "logs",
     config: str = "config/harness.yaml",
+    sync: bool = False,
 ) -> dict[str, str]:
     """Return {filename: content} for launchd plist files."""
     python = sys.executable
@@ -88,6 +92,7 @@ def generate_launchd(
     out = {}
 
     for command, interval in [("check", check_interval), ("work", work_interval)]:
+        extra_args = ["--sync"] if command == "work" and sync else None
         label = f"{label_prefix}.{command}"
         filename = f"~/Library/LaunchAgents/{label}.plist"
         out[filename] = _launchd_plist(
@@ -99,6 +104,7 @@ def generate_launchd(
             python=python,
             base_dir=str(base_dir),
             config=config,
+            extra_args=extra_args,
         )
 
     return out
@@ -116,7 +122,7 @@ After=network.target
 [Service]
 Type=oneshot
 WorkingDirectory={working_dir}
-ExecStart={python} -m library {command} --base-dir {base_dir} --config {config}
+ExecStart={python} -m library {command} --base-dir {base_dir} --config {config}{extra_args}
 StandardOutput=append:{log_dir}/symbiosis-{command}.log
 StandardError=append:{log_dir}/symbiosis-{command}.err
 """
@@ -142,12 +148,14 @@ def generate_systemd(
     work_interval: int,
     log_dir: str = "logs",
     config: str = "config/harness.yaml",
+    sync: bool = False,
 ) -> dict[str, str]:
     """Return {filename: content} for systemd service and timer unit files."""
     python = sys.executable
     out = {}
 
     for command, interval in [("check", check_interval), ("work", work_interval)]:
+        extra_args = " --sync" if command == "work" and sync else ""
         service = _SYSTEMD_SERVICE.format(
             command=command,
             working_dir=str(working_dir),
@@ -155,6 +163,7 @@ def generate_systemd(
             base_dir=str(base_dir),
             config=config,
             log_dir=log_dir,
+            extra_args=extra_args,
         )
         timer = _SYSTEMD_TIMER.format(command=command, interval=interval)
 
@@ -186,6 +195,7 @@ def generate_crontab(
     work_interval: int,
     log_dir: str = "logs",
     config: str = "config/harness.yaml",
+    sync: bool = False,
 ) -> dict[str, str]:
     """Return crontab entries as a single block."""
     python = sys.executable
@@ -196,11 +206,12 @@ def generate_crontab(
     ]
 
     for command, interval in [("check", check_interval), ("work", work_interval)]:
+        extra_args = " --sync" if command == "work" and sync else ""
         cron_expr = _interval_to_cron(interval)
         log_file = f"{working_dir}/{log_dir}/symbiosis-{command}.log"
         cmd = (
             f"cd {working_dir} && "
-            f"{python} -m library {command} "
+            f"{python} -m library {command}{extra_args} "
             f"--base-dir {base_dir} --config {config} "
             f">> {log_file} 2>&1"
         )
@@ -222,6 +233,7 @@ def generate_schedule_files(
     log_dir: str = "logs",
     config: str = "config/harness.yaml",
     scheduler_type: SchedulerType = "auto",
+    sync: bool = False,
 ) -> dict[str, str]:
     """
     Generate OS schedule config files.
@@ -234,10 +246,10 @@ def generate_schedule_files(
     sched = scheduler_type if scheduler_type != "auto" else detect_scheduler()
 
     if sched == "launchd":
-        return generate_launchd(base_dir, working_dir, check_interval, work_interval, log_dir, config)
+        return generate_launchd(base_dir, working_dir, check_interval, work_interval, log_dir, config, sync=sync)
     if sched == "systemd":
-        return generate_systemd(base_dir, working_dir, check_interval, work_interval, log_dir, config)
-    return generate_crontab(base_dir, working_dir, check_interval, work_interval, log_dir, config)
+        return generate_systemd(base_dir, working_dir, check_interval, work_interval, log_dir, config, sync=sync)
+    return generate_crontab(base_dir, working_dir, check_interval, work_interval, log_dir, config, sync=sync)
 
 
 def print_install_instructions(

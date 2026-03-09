@@ -68,6 +68,10 @@ adapters:
 storage_dir: instances
 store_path: harness.db
 poll_interval: 30
+
+sync:
+  repo: ../synthetic-space    # optional: sync memory to a data repo
+  prefix: symbiosis           # subdirectory within the data repo
 ```
 
 Providers and adapters are shared infrastructure — `${VAR}` references resolve from `.env` and environment variables at load time.
@@ -119,6 +123,17 @@ uv run symbiosis setup
 The scheduler loads all instance configs from `config/instances/`, registers their species, and runs a unified loop that:
 - Polls messaging adapters for incoming events (reactive triggers)
 - Checks cron schedules for timed entry points (scheduled triggers)
+
+Additional commands:
+
+```bash
+uv run symbiosis check         # poll adapters, enqueue jobs
+uv run symbiosis work          # drain job queue
+uv run symbiosis work --sync   # drain queue, then sync memory to data repo
+uv run symbiosis sync          # sync instance memory to data repo
+uv run symbiosis tick          # check + work (one cycle)
+uv run symbiosis schedule      # generate OS scheduler config files
+```
 
 ### Run tests
 
@@ -219,6 +234,22 @@ All species code interacts with infrastructure through `ctx`:
 | `ctx.store(namespace)` | Instance-private SQLite key/value store |
 | `ctx.shared_store(namespace)` | Species-shared SQLite key/value store |
 
+### Agent tools
+
+Species can opt in to additional tools via `make_tools(ctx, options)`:
+
+| Option | Tool | Description |
+|--------|------|-------------|
+| `messaging` | `send_message` | Send a message to a space (default: on) |
+| `rooms` | `list_rooms` | List configured rooms with metadata (default: on) |
+| `introspect` | `introspect` | View species description and instance config (default: on) |
+| `inter_instance` | `send_to_instance` | Send to another instance's mailbox |
+| `publish` | `publish` | Publish files to the data repo `_published/` directory |
+| `graph` | `graph_*` | Semantic graph tools (add/update/query nodes and edges) |
+| `activation_map` | `map_*` | 2D activation map tools (attention/affect heatmap) |
+
+All agents always have `read_file`, `write_file`, `list_files`, and `done` tools.
+
 ### Reusable patterns
 
 The tools layer provides patterns you can compose in your entry points:
@@ -318,3 +349,20 @@ model: local-model
 ```
 
 Workers communicate via `ctx.send_to()` / `ctx.read_inbox()` and coordinate via `ctx.shared_store()`.
+
+## Data sync
+
+Instance memory files can be synced to a separate git repository for external visibility (e.g. GitHub Pages).
+
+Add to `harness.yaml`:
+
+```yaml
+sync:
+  repo: ../synthetic-space    # path to data repository
+  prefix: symbiosis           # subdirectory within the repo (supports multi-project repos)
+  branch: main
+```
+
+This copies `.md` files from each instance's memory to `<repo>/<prefix>/<instance_id>/`, commits, and pushes. Use `symbiosis work --sync` to sync after each work cycle, or `symbiosis sync` to sync on demand.
+
+Agents can also publish rendered artefacts (reports, visualizations) to `_published/` within their data repo space using the `publish` tool, keeping them separate from memory files.

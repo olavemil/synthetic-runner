@@ -90,8 +90,11 @@ def _try_nn_weights_and_variables(ctx: InstanceContext) -> tuple[dict[str, float
     except ImportError:
         return None
 
-    fast_net, fast_meta = load_fast_net(ctx)
-    slow_net, slow_meta = load_slow_net(ctx)
+    try:
+        fast_net, fast_meta = load_fast_net(ctx)
+        slow_net, slow_meta = load_slow_net(ctx)
+    except ImportError:
+        return None
 
     if fast_net is None and slow_net is None:
         logger.info("NN forward: no nets available, falling back to defaults")
@@ -241,7 +244,10 @@ def _update_fast_net(ctx: InstanceContext, review_text: str) -> None:
     logger.info("Fast net update: parsed signals [%s]", sig_str)
 
     config = make_fast_net_config(len(_FAST_SEGMENT_IDS), include_map_features=True)
-    fast_net, meta = load_fast_net(ctx, fallback_config=config)
+    try:
+        fast_net, meta = load_fast_net(ctx, fallback_config=config)
+    except ImportError:
+        return
     created_new = False
     if fast_net is None:
         fast_net = _create_net_with_config(config)
@@ -297,7 +303,10 @@ def _update_slow_net(ctx: InstanceContext, sleep_text: str, session_label: str) 
     logger.info("Slow net update: parsed signals [%s] (session=%s)", sig_str, session_label)
 
     config = make_slow_net_config(len(_SLOW_SEGMENT_IDS), include_graph_features=True)
-    slow_net, meta = load_slow_net(ctx, fallback_config=config)
+    try:
+        slow_net, meta = load_slow_net(ctx, fallback_config=config)
+    except ImportError:
+        return
     created_new = False
     if slow_net is None:
         slow_net = _create_net_with_config(config)
@@ -487,7 +496,25 @@ def heartbeat(ctx: InstanceContext) -> None:
     # Assemble extra tools for thinking session (graph + map)
     from library.tools.graph import GRAPH_TOOL_SCHEMAS
     from library.tools.activation_map import MAP_TOOL_SCHEMAS
-    thinking_tools = GRAPH_TOOL_SCHEMAS + MAP_TOOL_SCHEMAS
+    publish_schema = {
+        "type": "function",
+        "function": {
+            "name": "publish",
+            "description": (
+                "Publish a file to the shared data repository, visible externally. "
+                "Use for reports, summaries, or creative output you want to share."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path (e.g. 'report.md')"},
+                    "content": {"type": "string", "description": "File content"},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    }
+    thinking_tools = GRAPH_TOOL_SCHEMAS + MAP_TOOL_SCHEMAS + [publish_schema]
 
     initial_state = {
         "think_system": think_system,
@@ -526,6 +553,14 @@ def heartbeat(ctx: InstanceContext) -> None:
 
     # Clear accumulated reviews after sleep consolidation
     ctx.write("reviews.md", "")
+
+    # Render and publish graph/map visualizations
+    try:
+        from library.publish import render_and_publish
+        render_and_publish(ctx)
+    except Exception as exc:
+        logger.warning("Post-heartbeat render failed: %s", exc)
+
     logger.info("Heartbeat complete, reviews cleared")
 
 

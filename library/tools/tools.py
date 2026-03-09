@@ -144,6 +144,33 @@ def make_tools(ctx: InstanceContext, options: dict | None = None) -> list[dict]:
             },
         })
 
+    if opts.get("publish", False):
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "publish",
+                "description": (
+                    "Publish a file to the shared data repository. "
+                    "Published files are visible externally (e.g. on GitHub Pages). "
+                    "Use for reports, summaries, or creative output you want to share."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "File path (e.g. 'report.md', 'notes/summary.md')",
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "File content to publish",
+                        },
+                    },
+                    "required": ["path", "content"],
+                },
+            },
+        })
+
     if opts.get("graph", False):
         from library.tools.graph import GRAPH_TOOL_SCHEMAS
         tools.extend(GRAPH_TOOL_SCHEMAS)
@@ -228,6 +255,11 @@ def handle_tool(ctx: InstanceContext, name: str, arguments: dict) -> tuple[str, 
     if name == "done":
         summary = arguments.get("summary", "Done.")
         return summary, True
+
+    if name == "publish":
+        from library.publish import publish_file
+        result = publish_file(ctx, arguments["path"], arguments["content"])
+        return result, False
 
     if name.startswith("graph_"):
         from library.tools.graph import handle_graph_tool

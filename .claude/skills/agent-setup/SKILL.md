@@ -40,6 +40,22 @@ schedule:
 
 Species-specific config goes as top-level keys (e.g., `thrivemind:`, `hecate:`).
 
+## Data Sync & Publish
+
+Instance memory can be synced to a separate data repository. Configure in `harness.yaml`:
+
+```yaml
+sync:
+  repo: ../synthetic-space    # path to data repo
+  prefix: symbiosis           # subdirectory within the repo
+  branch: main
+```
+
+- **Sync**: `symbiosis work --sync` or `symbiosis sync` copies `.md` files to `<repo>/<prefix>/<instance_id>/`, commits, and pushes.
+- **Publish tool**: Agents can publish files to `_published/` in their data repo space. Enable with `make_tools(ctx, {"publish": True})`.
+- **Post-heartbeat rendering**: Neural Dreamer auto-renders graph HTML and map PNG/GIF after heartbeat.
+- OS schedule files auto-include `--sync` when sync is configured.
+
 ## Available Species
 
 ### Draum (`species: draum`)

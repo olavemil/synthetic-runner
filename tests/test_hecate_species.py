@@ -74,7 +74,7 @@ class TestHecateOnMessage:
             if "Write the final reply in your own voice." in user_content:
                 composed_calls.append((caller, user_content))
                 return SimpleNamespace(message="Composed final message.")
-            if "Propose exactly one brief way to answer." in user_content:
+            if "propose exactly one brief way to answer." in user_content:
                 voice_name = caller.split("_")[-1]
                 return SimpleNamespace(message=f"{voice_name} suggestion.")
             return SimpleNamespace(message="fallback")
@@ -93,7 +93,7 @@ class TestHecateOnMessage:
         assert "(Aria) Aria suggestion." in compose_prompt
         assert "(Sable) Sable suggestion." in compose_prompt
         assert "(Lune) Lune suggestion." in compose_prompt
-        assert "Your character: Bold" in compose_prompt
+        assert "and you are Bold" in compose_prompt
         assert "1 to 4 paragraphs" in compose_prompt
 
     def test_on_message_routes_reply_to_latest_room_and_uses_room_scoped_context(self):
@@ -106,7 +106,7 @@ class TestHecateOnMessage:
             if "Write the final reply in your own voice." in user_content:
                 composed_calls.append(user_content)
                 return SimpleNamespace(message="Composed for ops.")
-            if "Propose exactly one brief way to answer." in user_content:
+            if "propose exactly one brief way to answer." in user_content:
                 return SimpleNamespace(message="One suggestion.")
             return SimpleNamespace(message="fallback")
 
@@ -136,7 +136,7 @@ class TestHecateOnMessage:
             if "Write the final reply in your own voice." in user_content:
                 composed_prompts.append(user_content)
                 return SimpleNamespace(message="Composed final message.")
-            if "Propose exactly one brief way to answer." in user_content:
+            if "propose exactly one brief way to answer." in user_content:
                 return SimpleNamespace(message="First sentence. Second sentence should be removed.")
             return SimpleNamespace(message="fallback")
 
@@ -159,7 +159,7 @@ class TestHecateOnMessage:
                 return SimpleNamespace(message=f"{voice_name} subconscious")
             if "Write the final reply in your own voice." in user_content:
                 return SimpleNamespace(message="Composed final message.")
-            if "Propose exactly one brief way to answer." in user_content:
+            if "propose exactly one brief way to answer." in user_content:
                 return SimpleNamespace(message="suggestion")
             return SimpleNamespace(message="suggestion")
 

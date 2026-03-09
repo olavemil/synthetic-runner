@@ -72,6 +72,14 @@ class AdapterConfig:
 
 
 @dataclass
+class SyncConfig:
+    repo: str | None = None       # path to data repo (or subdir within it)
+    prefix: str | None = None     # subdirectory within repo for this project
+    branch: str = "main"
+    remote: str | None = None     # git remote URL for initial clone
+
+
+@dataclass
 class HarnessConfig:
     providers: list[ProviderConfig] = field(default_factory=list)
     adapters: list[AdapterConfig] = field(default_factory=list)
@@ -79,6 +87,7 @@ class HarnessConfig:
     store_path: str = "harness.db"
     poll_interval: int = 30
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
+    sync: SyncConfig = field(default_factory=SyncConfig)
 
     def get_provider(self, provider_id: str) -> ProviderConfig:
         for p in self.providers:
@@ -145,6 +154,14 @@ def load_harness_config(
         log_file=scheduler_raw.get("log_file"),
     )
 
+    sync_raw = resolved.get("sync", {})
+    sync = SyncConfig(
+        repo=sync_raw.get("repo"),
+        prefix=sync_raw.get("prefix"),
+        branch=sync_raw.get("branch", "main"),
+        remote=sync_raw.get("remote"),
+    )
+
     return HarnessConfig(
         providers=providers,
         adapters=adapters,
@@ -152,6 +169,7 @@ def load_harness_config(
         store_path=resolved.get("store_path", "harness.db"),
         poll_interval=resolved.get("poll_interval", 30),
         scheduler=scheduler,
+        sync=sync,
     )
 
 

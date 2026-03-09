@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 _INSTANCE_TEMPLATE_STEMS = {"example", "sample", "template"}
 
-_KNOWN_COMMANDS = {"run", "setup", "check", "work", "tick", "schedule", "-h", "--help"}
+_KNOWN_COMMANDS = {"run", "setup", "check", "work", "tick", "schedule", "sync", "-h", "--help"}
 
 
 class _MaxLevelFilter(logging.Filter):
@@ -218,6 +218,18 @@ def _run_work(args: argparse.Namespace) -> None:
     worker.run()
     store_db.close()
 
+    if getattr(args, "sync", False):
+        from library.sync import sync_instances
+        sync_config = harness_config.sync
+        if sync_config.repo:
+            sync_instances(
+                instances_dir=base / harness_config.storage_dir,
+                repo_path=Path(sync_config.repo),
+                branch=sync_config.branch,
+                remote=sync_config.remote,
+                prefix=sync_config.prefix,
+            )
+
 
 def _run_tick(args: argparse.Namespace) -> None:
     """Run one check + one work cycle (convenience for testing)."""
@@ -248,9 +260,35 @@ def _run_schedule(args: argparse.Namespace) -> None:
         log_dir="logs",
         config=args.config,
         scheduler_type=scheduler_type,
+        sync=harness_config.sync.repo is not None,
     )
 
     print_install_instructions(files, actual_type)
+
+
+def _run_sync(args: argparse.Namespace) -> None:
+    """Sync instance memory .md files to a data repo."""
+    _configure_logging(args.log_level, getattr(args, "log_file", None))
+
+    from library.sync import sync_instances
+
+    base = Path(args.base_dir)
+    harness_config = load_harness_config(base / args.config)
+    sync_config = harness_config.sync
+
+    repo_path = args.repo or sync_config.repo
+    if not repo_path:
+        logger.error("No data repo configured. Set sync.repo in harness.yaml or pass --repo")
+        sys.exit(1)
+
+    sync_instances(
+        instances_dir=base / harness_config.storage_dir,
+        repo_path=Path(repo_path),
+        branch=sync_config.branch,
+        remote=sync_config.remote,
+        prefix=sync_config.prefix,
+        push=not args.no_push,
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -289,6 +327,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     work_parser = subparsers.add_parser("work", help="Drain job queue run-to-empty")
     _add_common(work_parser)
+    work_parser.add_argument(
+        "--sync",
+        action="store_true",
+        help="Run sync after draining queue",
+    )
 
     tick_parser = subparsers.add_parser("tick", help="Run one check + work cycle")
     _add_common(tick_parser)
@@ -310,6 +353,19 @@ def _build_parser() -> argparse.ArgumentParser:
         default="auto",
         choices=["auto", "launchd", "systemd", "crontab"],
         help="OS scheduler type (default: auto-detect)",
+    )
+
+    sync_parser = subparsers.add_parser("sync", help="Sync instance memory to data repo")
+    _add_common(sync_parser)
+    sync_parser.add_argument(
+        "--repo",
+        default=None,
+        help="Path to data repo (overrides harness.yaml sync.repo)",
+    )
+    sync_parser.add_argument(
+        "--no-push",
+        action="store_true",
+        help="Commit but don't push",
     )
 
     setup_parser = subparsers.add_parser("setup", help="Run interactive setup wizard")
@@ -353,6 +409,10 @@ def main(argv: list[str] | None = None):
 
     if args.command == "schedule":
         _run_schedule(args)
+        return
+
+    if args.command == "sync":
+        _run_sync(args)
         return
 
     _run_scheduler(args)

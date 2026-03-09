@@ -300,7 +300,7 @@ class Worker:
             instance_config.instance_id,
         )
 
-        return InstanceContext(
+        ctx = InstanceContext(
             instance_id=instance_config.instance_id,
             species_id=instance_config.species,
             storage=storage,
@@ -312,6 +312,8 @@ class Worker:
             mailbox=mailbox,
             instance_config=instance_config,
         )
+        ctx._sync_config = self._config.sync
+        return ctx
 
     def _build_adapter(self, instance_config):
         instance_id = instance_config.instance_id

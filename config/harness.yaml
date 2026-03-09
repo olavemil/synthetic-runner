@@ -21,3 +21,7 @@ scheduler:
   check_interval: 300    # seconds between check runs (poll + enqueue)
   work_interval: 60      # seconds between work runs (drain queue)
   log_file: logs/symbiosis.log
+
+sync:
+  repo: ../synthetic-space
+  prefix: symbiosis

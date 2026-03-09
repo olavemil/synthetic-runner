@@ -18,7 +18,9 @@ uv run pytest                  # run all tests
 uv run pytest tests/test_X.py  # run specific test file
 uv run symbiosis check         # poll adapters, enqueue jobs (lightweight)
 uv run symbiosis work          # drain job queue run-to-empty
+uv run symbiosis work --sync   # drain queue, then sync memory to data repo
 uv run symbiosis tick          # check + work (one cycle, for testing)
+uv run symbiosis sync          # sync instance memory to data repo
 uv run symbiosis schedule      # print OS scheduler config files
 uv run symbiosis setup         # interactive setup wizard
 uv run symbiosis run           # legacy continuous loop
@@ -64,7 +66,7 @@ Generate OS schedule files with `symbiosis schedule` (reads `scheduler.check_int
 
 ```
 config/
-  harness.yaml          # providers (with max_concurrency), adapters, scheduler settings
+  harness.yaml          # providers (with max_concurrency), adapters, scheduler, sync settings
   instances/
     <id>.yaml           # species, provider, model, messaging (with access_token), schedule
 .env                    # secrets: API keys, Matrix tokens
@@ -73,6 +75,24 @@ config/
 - `config/instances/example.yaml` is committed; real instance configs are gitignored.
 - Per-instance Matrix `access_token` lives in instance YAML (not shared adapter config).
 - `schedule.max_idle_heartbeats: N` limits heartbeat runs when no messages received.
+
+## Data Sync & Publish
+
+Instance memory files (`.md`) can be automatically synced to a separate data repository for external visibility (e.g. GitHub Pages).
+
+Configure in `harness.yaml`:
+
+```yaml
+sync:
+  repo: ../synthetic-space    # path to data repo (can be relative)
+  prefix: symbiosis           # subdirectory within the data repo
+  branch: main
+```
+
+- **Sync** (`library/sync.py`): Copies `.md` files from `instances/*/memory/` to `<repo>/<prefix>/<instance_id>/`. Commits and pushes automatically. Triggered by `symbiosis sync` or `symbiosis work --sync`.
+- **Publish** (`library/publish.py`): Agents can publish rendered artefacts (reports, graphs, maps) to `_published/` within their data repo space, separate from memory files. Enabled via `make_tools(ctx, {"publish": True})`.
+- **Post-heartbeat rendering**: Neural Dreamer automatically renders `graph.html`, `map.png`, and `map_session.gif` after heartbeat and publishes them to the data repo.
+- Generated OS schedule files (`symbiosis schedule`) include `--sync` when sync is configured.
 
 ## Key Files
 
@@ -94,6 +114,8 @@ config/
 | `library/tools/activation_map.py` | 2D activation map tools (attention/affect heatmap) |
 | `library/tools/neural.py` | Fast/slow neural net management, checkpoints, signal encoding |
 | `library/tools/rendering.py` | Graph→HTML, Map→PNG/GIF visualization |
+| `library/sync.py` | Instance memory sync to data repo |
+| `library/publish.py` | Publish artefacts to data repo `_published/` + post-heartbeat rendering |
 | `library/species/draum/` | Draum species: reactive + heartbeat |
 | `library/species/subconscious_dreamer/` | Subconscious Dreamer: three-phase thinking + response pipelines |
 | `library/species/neural_dreamer/` | Neural Dreamer: NN-driven prompt configuration + memory tools |
