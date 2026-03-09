@@ -76,6 +76,19 @@ def _write_index_files(out_dir: Path) -> int:
             link = str(rel.with_suffix(""))
             lines.append(f"- [{display}]({link})")
 
+        # Link to published HTML files (graphs, visualizations)
+        published_dir = instance_dir / "_published"
+        if published_dir.is_dir():
+            html_files = sorted(published_dir.glob("*.html"))
+            if html_files:
+                lines.append("")
+                lines.append("### Visualizations")
+                lines.append("")
+                for html_file in html_files:
+                    rel = html_file.relative_to(instance_dir)
+                    display = html_file.stem.replace("_", " ").replace("-", " ").title()
+                    lines.append(f"- [{display}]({rel})")
+
         content = "\n".join(lines) + "\n"
         index_path = instance_dir / "index.md"
         if index_path.exists() and index_path.read_text() == content:

@@ -180,6 +180,24 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
         logger.info("Thrivemind on_message no candidates; skipping send")
         return
 
+    # Check minimum consensus threshold (33%)
+    approval_ratio = winner_approval_ratio(result)
+    if approval_ratio < 0.33:
+        logger.info(
+            "Thrivemind on_message consensus too low (%.3f < 0.33); skipping send (winner=%s candidate_count=%d)",
+            approval_ratio, result.get("winner_member", ""), result.get("candidate_count", 0),
+        )
+        record_reply_event(
+            ctx,
+            winner_name=str(result.get("winner_member", "")),
+            candidate_count=int(result.get("candidate_count", 0)),
+            has_consensus=False,
+            approval_ratio=approval_ratio,
+        )
+        colony = update_approvals(colony, result["votes"], result["winner_member"], cfg)
+        save_colony(ctx, colony)
+        return
+
     # Create writer identity
     provider, model = parse_model(cfg.writer_model) if cfg.writer_model else (None, "")
     writer = Identity(name="Colony", model=model, provider=provider, personality="unified colony voice")
@@ -233,7 +251,7 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
         winner_name=str(result.get("winner_member", "")),
         candidate_count=int(result.get("candidate_count", 0)),
         has_consensus=bool(result.get("has_consensus")),
-        approval_ratio=winner_approval_ratio(result),
+        approval_ratio=approval_ratio,
     )
 
     # Update approvals and save colony
