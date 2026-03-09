@@ -4,12 +4,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from symbiosis.harness.context import InstanceContext
-from symbiosis.harness.storage import NamespacedStorage
-from symbiosis.harness.store import open_store
-from symbiosis.harness.mailbox import Mailbox
-from symbiosis.harness.config import InstanceConfig, MessagingConfig, SpaceMapping
-from symbiosis.harness.adapters import Event
+from library.harness.context import InstanceContext
+from library.harness.storage import NamespacedStorage
+from library.harness.store import open_store
+from library.harness.mailbox import Mailbox
+from library.harness.config import InstanceConfig, MessagingConfig, SpaceMapping
+from library.harness.adapters import Event
 
 
 def make_ctx(tmp_path, adapter=None, messaging=True):
@@ -232,7 +232,7 @@ class TestListRoomsTool:
             "members": ["@a:test", "@b:test"],
         }
         ctx = make_ctx(tmp_path, adapter=adapter)
-        from symbiosis.toolkit.tools import handle_tool
+        from library.tools.tools import handle_tool
         result, is_done = handle_tool(ctx, "list_rooms", {})
         assert not is_done
         assert "Main Room" in result
@@ -241,20 +241,20 @@ class TestListRoomsTool:
 
     def test_list_rooms_no_adapter(self, tmp_path):
         ctx = make_ctx(tmp_path, adapter=None, messaging=False)
-        from symbiosis.toolkit.tools import handle_tool
+        from library.tools.tools import handle_tool
         result, is_done = handle_tool(ctx, "list_rooms", {})
         assert "no rooms" in result
 
     def test_list_rooms_tool_in_make_tools(self, tmp_path):
         ctx = make_ctx(tmp_path)
-        from symbiosis.toolkit.tools import make_tools
+        from library.tools.tools import make_tools
         tools = make_tools(ctx)
         tool_names = [t["function"]["name"] for t in tools]
         assert "list_rooms" in tool_names
 
     def test_list_rooms_tool_gated_by_option(self, tmp_path):
         ctx = make_ctx(tmp_path)
-        from symbiosis.toolkit.tools import make_tools
+        from library.tools.tools import make_tools
         tools = make_tools(ctx, options={"rooms": False})
         tool_names = [t["function"]["name"] for t in tools]
         assert "list_rooms" not in tool_names
@@ -263,7 +263,7 @@ class TestListRoomsTool:
 class TestIntrospectTool:
     def test_introspect_returns_species_description_and_config(self, tmp_path):
         ctx = make_ctx(tmp_path)
-        from symbiosis.toolkit.tools import handle_tool
+        from library.tools.tools import handle_tool
         result, is_done = handle_tool(ctx, "introspect", {})
         assert not is_done
         assert "## Instance Config" in result
@@ -272,20 +272,20 @@ class TestIntrospectTool:
 
     def test_introspect_includes_spaces(self, tmp_path):
         ctx = make_ctx(tmp_path)
-        from symbiosis.toolkit.tools import handle_tool
+        from library.tools.tools import handle_tool
         result, _ = handle_tool(ctx, "introspect", {})
         assert "main" in result
 
     def test_introspect_tool_in_make_tools(self, tmp_path):
         ctx = make_ctx(tmp_path)
-        from symbiosis.toolkit.tools import make_tools
+        from library.tools.tools import make_tools
         tools = make_tools(ctx)
         tool_names = [t["function"]["name"] for t in tools]
         assert "introspect" in tool_names
 
     def test_introspect_tool_gated_by_option(self, tmp_path):
         ctx = make_ctx(tmp_path)
-        from symbiosis.toolkit.tools import make_tools
+        from library.tools.tools import make_tools
         tools = make_tools(ctx, options={"introspect": False})
         tool_names = [t["function"]["name"] for t in tools]
         assert "introspect" not in tool_names
@@ -311,7 +311,7 @@ class TestFormatRoomsContext:
             "members": ["@a:test"],
         }
         ctx = make_ctx(tmp_path, adapter=adapter)
-        from symbiosis.toolkit.prompts import format_rooms_context
+        from library.tools.prompts import format_rooms_context
         result = format_rooms_context(ctx)
         assert "## Rooms" in result
         assert "**Main Room**" in result
@@ -320,7 +320,7 @@ class TestFormatRoomsContext:
 
     def test_format_rooms_context_no_adapter(self, tmp_path):
         ctx = make_ctx(tmp_path, adapter=None, messaging=False)
-        from symbiosis.toolkit.prompts import format_rooms_context
+        from library.tools.prompts import format_rooms_context
         assert format_rooms_context(ctx) == ""
 
 

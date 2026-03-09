@@ -5,7 +5,7 @@ import json
 import pytest
 from unittest.mock import MagicMock
 
-from symbiosis.toolkit.graph import (
+from library.tools.graph import (
     SemanticGraph,
     Node,
     Edge,

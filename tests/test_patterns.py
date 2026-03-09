@@ -5,8 +5,8 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
-from symbiosis.harness.adapters import Event
-from symbiosis.harness.providers import LLMResponse, ToolCall
+from library.harness.adapters import Event
+from library.harness.providers import LLMResponse, ToolCall
 
 
 def make_mock_ctx(memory_files=None):
@@ -33,7 +33,7 @@ def make_mock_ctx(memory_files=None):
 
 class TestGutResponse:
     def test_returns_structured_guidance(self):
-        from symbiosis.toolkit.patterns import gut_response
+        from library.tools.patterns import gut_response
 
         ctx = make_mock_ctx({"thinking.md": "some thoughts", "intentions.md": "be helpful"})
 
@@ -50,7 +50,7 @@ class TestGutResponse:
         ctx.llm.assert_called_once()
 
     def test_fallback_on_invalid_json(self):
-        from symbiosis.toolkit.patterns import gut_response
+        from library.tools.patterns import gut_response
 
         ctx = make_mock_ctx()
         ctx.llm = MagicMock(return_value=LLMResponse(message="not json"))
@@ -64,7 +64,7 @@ class TestGutResponse:
 
 class TestComposeResponse:
     def test_returns_message(self):
-        from symbiosis.toolkit.patterns import compose_response
+        from library.tools.patterns import compose_response
 
         ctx = make_mock_ctx()
         ctx.llm = MagicMock(return_value=LLMResponse(message="Hi there!"))
@@ -76,7 +76,7 @@ class TestComposeResponse:
         assert "but phrasing does not need to be verbatim." in called_user
 
     def test_returns_none_for_null(self):
-        from symbiosis.toolkit.patterns import compose_response
+        from library.tools.patterns import compose_response
 
         ctx = make_mock_ctx()
         ctx.llm = MagicMock(return_value=LLMResponse(message="NULL"))
@@ -87,7 +87,7 @@ class TestComposeResponse:
 
 class TestSubconscious:
     def test_writes_subconscious(self):
-        from symbiosis.toolkit.patterns import run_subconscious
+        from library.tools.patterns import run_subconscious
 
         files = {"thinking.md": "thoughts"}
         ctx = make_mock_ctx(files)
@@ -100,7 +100,7 @@ class TestSubconscious:
 
 class TestReact:
     def test_writes_intentions(self):
-        from symbiosis.toolkit.patterns import run_react
+        from library.tools.patterns import run_react
 
         files = {"subconscious.md": "feeling good", "intentions.md": "old intentions"}
         ctx = make_mock_ctx(files)
@@ -111,7 +111,7 @@ class TestReact:
         ctx.write.assert_called_with("intentions.md", "new intentions")
 
     def test_skips_without_subconscious(self):
-        from symbiosis.toolkit.patterns import run_react
+        from library.tools.patterns import run_react
 
         ctx = make_mock_ctx({})
         run_react(ctx, "reactive")
@@ -120,7 +120,7 @@ class TestReact:
 
 class TestUpdateRelationships:
     def test_updates_for_senders(self):
-        from symbiosis.toolkit.patterns import update_relationships
+        from library.tools.patterns import update_relationships
 
         ctx = make_mock_ctx({})
         ctx.llm = MagicMock(return_value=LLMResponse(message="Alice is friendly"))
@@ -131,7 +131,7 @@ class TestUpdateRelationships:
         ctx.write.assert_called_with("relationships/alice.md", "Alice is friendly")
 
     def test_skips_without_events(self):
-        from symbiosis.toolkit.patterns import update_relationships
+        from library.tools.patterns import update_relationships
 
         ctx = make_mock_ctx()
         update_relationships(ctx, "reactive", [])
@@ -140,7 +140,7 @@ class TestUpdateRelationships:
 
 class TestDistillMemory:
     def test_returns_digest(self):
-        from symbiosis.toolkit.patterns import distill_memory
+        from library.tools.patterns import distill_memory
 
         files = {"thinking.md": "many thoughts", "project.md": "project info"}
         ctx = make_mock_ctx(files)
@@ -150,7 +150,7 @@ class TestDistillMemory:
         assert result == "compressed digest"
 
     def test_empty_memory(self):
-        from symbiosis.toolkit.patterns import distill_memory
+        from library.tools.patterns import distill_memory
 
         ctx = make_mock_ctx({})
         result = distill_memory(ctx)
@@ -159,7 +159,7 @@ class TestDistillMemory:
 
 class TestRunSession:
     def test_session_with_tool_calls(self):
-        from symbiosis.toolkit.patterns import run_session
+        from library.tools.patterns import run_session
 
         files = {"test.md": "content"}
         ctx = make_mock_ctx(files)
@@ -182,7 +182,7 @@ class TestRunSession:
         assert result is False  # no send_message called
 
     def test_session_ends_on_no_tools(self):
-        from symbiosis.toolkit.patterns import run_session
+        from library.tools.patterns import run_session
 
         ctx = make_mock_ctx()
         ctx.llm = MagicMock(return_value=LLMResponse(message="thinking..."))

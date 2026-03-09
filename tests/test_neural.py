@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from symbiosis.toolkit.neural import (
+from library.tools.neural import (
     FAST_SIGNAL_NAMES,
     SLOW_SIGNAL_NAMES,
     FAST_VARIABLE_NAMES,
@@ -196,7 +196,7 @@ except ImportError:
 @pytest.mark.skipif(not HAS_TORCH, reason="PyTorch not installed")
 class TestNet:
     def test_forward_returns_correct_dim(self):
-        from symbiosis.toolkit.neural import Net
+        from library.tools.neural import Net
 
         config = make_fast_net_config(6)
         net = Net(config)
@@ -204,7 +204,7 @@ class TestNet:
         assert len(result) == config.output_dim
 
     def test_forward_deterministic(self):
-        from symbiosis.toolkit.neural import Net
+        from library.tools.neural import Net
 
         config = make_fast_net_config(4)
         net = Net(config)
@@ -214,7 +214,7 @@ class TestNet:
         assert r1 == r2
 
     def test_train_step_reduces_loss(self):
-        from symbiosis.toolkit.neural import Net
+        from library.tools.neural import Net
 
         config = make_fast_net_config(3, hidden_dim=16)
         net = Net(config)
@@ -229,7 +229,7 @@ class TestNet:
         assert loss2 < loss1
 
     def test_slow_net_forward(self):
-        from symbiosis.toolkit.neural import Net
+        from library.tools.neural import Net
 
         config = make_slow_net_config(5)
         net = Net(config)
@@ -238,7 +238,7 @@ class TestNet:
         assert len(result) == config.output_dim
 
     def test_state_dict_restorable(self):
-        from symbiosis.toolkit.neural import Net
+        from library.tools.neural import Net
 
         config = make_fast_net_config(4)
         net1 = Net(config)
@@ -265,7 +265,7 @@ class TestNetCheckpoints:
         return ctx
 
     def test_save_and_load_fast_net(self):
-        from symbiosis.toolkit.neural import (
+        from library.tools.neural import (
             Net, save_fast_net, load_fast_net, CheckpointMeta,
         )
 
@@ -285,7 +285,7 @@ class TestNetCheckpoints:
         assert loaded_meta.session_label == "s3"
 
     def test_save_and_load_slow_net(self):
-        from symbiosis.toolkit.neural import (
+        from library.tools.neural import (
             Net, save_slow_net, load_slow_net,
         )
 
@@ -301,7 +301,7 @@ class TestNetCheckpoints:
         assert loaded_net.forward(signals) == expected
 
     def test_load_missing_returns_none(self):
-        from symbiosis.toolkit.neural import load_fast_net
+        from library.tools.neural import load_fast_net
 
         ctx = self._mock_ctx()
         net, meta = load_fast_net(ctx)
@@ -309,7 +309,7 @@ class TestNetCheckpoints:
         assert meta.update_count == 0
 
     def test_load_missing_with_fallback(self):
-        from symbiosis.toolkit.neural import load_fast_net
+        from library.tools.neural import load_fast_net
 
         ctx = self._mock_ctx()
         fallback = make_fast_net_config(4)
@@ -318,7 +318,7 @@ class TestNetCheckpoints:
 
     def test_end_to_end_fast_cycle(self):
         """Simulate: forward → decode → train → save → load → verify."""
-        from symbiosis.toolkit.neural import (
+        from library.tools.neural import (
             Net, save_fast_net, load_fast_net, CheckpointMeta,
         )
 
@@ -357,7 +357,7 @@ class TestNetCheckpoints:
 
 class TestGraphFeatureEncoding:
     def _make_graph(self):
-        from symbiosis.toolkit.graph import SemanticGraph
+        from library.tools.graph import SemanticGraph
         g = SemanticGraph()
         g.add_node("a", "Node A", {"salience": 0.8})
         g.add_node("b", "Node B", {"salience": 0.6})
@@ -374,7 +374,7 @@ class TestGraphFeatureEncoding:
         assert len(result) == len(GRAPH_FEATURE_NAMES)
 
     def test_empty_graph(self):
-        from symbiosis.toolkit.graph import SemanticGraph
+        from library.tools.graph import SemanticGraph
         g = SemanticGraph()
         result = encode_graph_features(g)
         assert result == [0.0] * len(GRAPH_FEATURE_NAMES)
@@ -411,7 +411,7 @@ class TestGraphFeatureEncoding:
 
 class TestMapFeatureEncoding:
     def _make_map(self):
-        from symbiosis.toolkit.activation_map import ActivationMap
+        from library.tools.activation_map import ActivationMap
         m = ActivationMap(8, 8, "x", "y", "test")
         m.set_region(4, 4, 2, 0.8, "gaussian")
         m.set(1, 1, -0.5)
@@ -423,7 +423,7 @@ class TestMapFeatureEncoding:
         assert len(result) == len(MAP_FEATURE_NAMES)
 
     def test_empty_map(self):
-        from symbiosis.toolkit.activation_map import ActivationMap
+        from library.tools.activation_map import ActivationMap
         m = ActivationMap(4, 4)
         result = encode_map_features(m)
         # All zeros → mean=0, variance=0, peak=0, etc.
@@ -448,14 +448,14 @@ class TestMapFeatureEncoding:
         assert 0.0 < result[6] <= 1.0  # some cells active
 
     def test_asymmetry_positive_biased(self):
-        from symbiosis.toolkit.activation_map import ActivationMap
+        from library.tools.activation_map import ActivationMap
         m = ActivationMap(4, 4)
         m.set_region(2, 2, 1, 0.9, "hard")
         result = encode_map_features(m)
         assert result[7] > 0.0  # more positive mass → positive asymmetry
 
     def test_asymmetry_negative_biased(self):
-        from symbiosis.toolkit.activation_map import ActivationMap
+        from library.tools.activation_map import ActivationMap
         m = ActivationMap(4, 4)
         m.set_region(2, 2, 2, -0.8, "hard")
         result = encode_map_features(m)

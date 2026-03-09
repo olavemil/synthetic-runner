@@ -5,10 +5,10 @@ from __future__ import annotations
 import random
 import time
 
-from symbiosis.harness.store import open_store, NamespacedStore
-from symbiosis.toolkit.identity import AXIS_NAMES, Identity, format_persona
-from symbiosis.toolkit.voting import borda_tally
-from symbiosis.toolkit.thrivemind import (
+from library.harness.store import open_store, NamespacedStore
+from library.tools.identity import AXIS_NAMES, Identity, format_persona
+from library.tools.voting import borda_tally
+from library.tools.thrivemind import (
     ThrivemindConfig,
     build_colony_snapshot,
     select_suggesters,

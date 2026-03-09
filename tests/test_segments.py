@@ -2,7 +2,7 @@
 
 import pytest
 
-from symbiosis.toolkit.segments import (
+from library.tools.segments import (
     Segment,
     SegmentRegistry,
     load_registry_from_string,

@@ -1,11 +1,11 @@
-"""Tests for symbiosis.toolkit.voting."""
+"""Tests for library.tools.voting."""
 
 from __future__ import annotations
 
 import random
 
-from symbiosis.toolkit.voting import borda_tally, approval_weights, weighted_sample
-from symbiosis.toolkit.identity import Identity
+from library.tools.voting import borda_tally, approval_weights, weighted_sample
+from library.tools.identity import Identity
 
 
 class TestBordaTally:

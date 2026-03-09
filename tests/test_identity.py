@@ -1,8 +1,8 @@
-"""Tests for symbiosis.toolkit.identity."""
+"""Tests for library.tools.identity."""
 
 from __future__ import annotations
 
-from symbiosis.toolkit.identity import (
+from library.tools.identity import (
     AXES,
     AXIS_NAMES,
     Identity,

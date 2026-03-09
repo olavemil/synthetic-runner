@@ -2,7 +2,7 @@
 
 import pytest
 
-from symbiosis.harness.storage import NamespacedStorage
+from library.harness.storage import NamespacedStorage
 
 
 class TestNamespacedStorage:

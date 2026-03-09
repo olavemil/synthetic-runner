@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from symbiosis.harness.providers import LLMResponse, ToolCall
+from library.harness.providers import LLMResponse, ToolCall
 
 
 class TestLLMResponse:
@@ -25,7 +25,7 @@ class TestLLMResponse:
 
 class TestOpenAICompatProvider:
     def test_normalize_response(self):
-        from symbiosis.harness.providers.openai_compat import OpenAICompatProvider
+        from library.harness.providers.openai_compat import OpenAICompatProvider
 
         provider = OpenAICompatProvider.__new__(OpenAICompatProvider)
 
@@ -51,7 +51,7 @@ class TestOpenAICompatProvider:
         assert result.usage["total_tokens"] == 30
 
     def test_think_block_stripping(self):
-        from symbiosis.harness.providers.openai_compat import OpenAICompatProvider
+        from library.harness.providers.openai_compat import OpenAICompatProvider
 
         provider = OpenAICompatProvider.__new__(OpenAICompatProvider)
 
@@ -72,7 +72,7 @@ class TestOpenAICompatProvider:
         assert "<think>" not in result.message
 
     def test_tool_call_parsing(self):
-        from symbiosis.harness.providers.openai_compat import OpenAICompatProvider
+        from library.harness.providers.openai_compat import OpenAICompatProvider
 
         provider = OpenAICompatProvider.__new__(OpenAICompatProvider)
 
@@ -101,7 +101,7 @@ class TestOpenAICompatProvider:
 
 class TestAnthropicProvider:
     def test_convert_tools(self):
-        from symbiosis.harness.providers.anthropic import AnthropicProvider
+        from library.harness.providers.anthropic import AnthropicProvider
 
         provider = AnthropicProvider.__new__(AnthropicProvider)
 
@@ -121,7 +121,7 @@ class TestAnthropicProvider:
         assert "input_schema" in result[0]
 
     def test_convert_tool_choice(self):
-        from symbiosis.harness.providers.anthropic import AnthropicProvider
+        from library.harness.providers.anthropic import AnthropicProvider
 
         provider = AnthropicProvider.__new__(AnthropicProvider)
 
@@ -133,7 +133,7 @@ class TestAnthropicProvider:
         }
 
     def test_normalize_response(self):
-        from symbiosis.harness.providers.anthropic import AnthropicProvider
+        from library.harness.providers.anthropic import AnthropicProvider
 
         provider = AnthropicProvider.__new__(AnthropicProvider)
 
@@ -152,7 +152,7 @@ class TestAnthropicProvider:
         assert result.usage["prompt_tokens"] == 10
 
     def test_normalize_tool_use(self):
-        from symbiosis.harness.providers.anthropic import AnthropicProvider
+        from library.harness.providers.anthropic import AnthropicProvider
 
         provider = AnthropicProvider.__new__(AnthropicProvider)
 

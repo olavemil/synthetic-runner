@@ -4,7 +4,7 @@ from pathlib import Path
 
 import yaml
 
-from symbiosis.setup_wizard import run_setup
+from library.setup_wizard import run_setup
 
 
 def _input_from(values: list[str]):

@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from symbiosis.harness.adapters import Event
-from symbiosis.harness.adapters.local_file import LocalFileAdapter
+from library.harness.adapters import Event
+from library.harness.adapters.local_file import LocalFileAdapter
 
 
 class TestLocalFileAdapter:

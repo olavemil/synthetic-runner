@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from symbiosis.toolkit.pipeline import (
+from library.tools.pipeline import (
     resolve_input,
     write_output,
     consume_input,

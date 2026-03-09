@@ -7,9 +7,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from symbiosis.harness.adapters import Event
-from symbiosis.harness.providers import LLMResponse, ToolCall
-from symbiosis.toolkit.segments import DEFAULT_VARIABLES
+from library.harness.adapters import Event
+from library.harness.providers import LLMResponse, ToolCall
+from library.tools.segments import DEFAULT_VARIABLES
 
 
 def make_mock_ctx(files=None):
@@ -33,13 +33,13 @@ def make_mock_ctx(files=None):
 
 class TestNeuralDreamerManifest:
     def test_species_id(self):
-        from symbiosis.__main__ import load_species
+        from library.__main__ import load_species
 
         s = load_species("neural_dreamer")
         assert s.manifest().species_id == "neural_dreamer"
 
     def test_entry_points(self):
-        from symbiosis.__main__ import load_species
+        from library.__main__ import load_species
 
         s = load_species("neural_dreamer")
         names = [e.name for e in s.manifest().entry_points]
@@ -47,7 +47,7 @@ class TestNeuralDreamerManifest:
         assert "heartbeat" in names
 
     def test_default_files(self):
-        from symbiosis.__main__ import load_species
+        from library.__main__ import load_species
 
         s = load_species("neural_dreamer")
         files = s.manifest().default_files
@@ -65,8 +65,8 @@ class TestNeuralDreamerManifest:
 
 class TestSegmentIntegration:
     def test_default_weights_produce_segments(self):
-        from symbiosis.species.neural_dreamer import _DEFAULT_WEIGHTS, _REGISTRY
-        from symbiosis.toolkit.segments import select_segments
+        from library.species.neural_dreamer import _DEFAULT_WEIGHTS, _REGISTRY
+        from library.tools.segments import select_segments
 
         selected = select_segments(_REGISTRY, _DEFAULT_WEIGHTS)
         assert len(selected) > 0
@@ -75,10 +75,10 @@ class TestSegmentIntegration:
         assert "state" in categories
 
     def test_inject_segments_replaces_placeholders(self):
-        from symbiosis.species.neural_dreamer import (
+        from library.species.neural_dreamer import (
             _inject_segments, _REGISTRY, _DEFAULT_WEIGHTS,
         )
-        from symbiosis.toolkit.segments import DEFAULT_VARIABLES
+        from library.tools.segments import DEFAULT_VARIABLES
 
         template = "Before. {segment_identity} After. {segment_state}"
         result = _inject_segments(template, _REGISTRY, _DEFAULT_WEIGHTS, dict(DEFAULT_VARIABLES), ["identity", "state"])
@@ -88,7 +88,7 @@ class TestSegmentIntegration:
         assert "After." in result
 
     def test_load_weights_from_storage(self):
-        from symbiosis.species.neural_dreamer import _load_weights_and_variables
+        from library.species.neural_dreamer import _load_weights_and_variables
 
         custom = {"identity-curious": 0.8, "state-engaged": 0.7}
         ctx = make_mock_ctx({
@@ -99,7 +99,7 @@ class TestSegmentIntegration:
         assert weights["identity-curious"] == 0.8
 
     def test_load_weights_falls_back_to_defaults(self):
-        from symbiosis.species.neural_dreamer import _load_weights_and_variables, _DEFAULT_WEIGHTS
+        from library.species.neural_dreamer import _load_weights_and_variables, _DEFAULT_WEIGHTS
 
         ctx = make_mock_ctx({"graph.json": "", "activation_map.json": ""})
         weights, variables = _load_weights_and_variables(ctx)
@@ -108,7 +108,7 @@ class TestSegmentIntegration:
 
 class TestReviewSignalParsing:
     def test_parse_review_signals(self):
-        from symbiosis.species.neural_dreamer import _parse_review_signals
+        from library.species.neural_dreamer import _parse_review_signals
 
         text = "success: 0.8\ncoherence: 0.7\neffort: 0.3\nsurprise: -0.2\nSome free-form text."
         signals = _parse_review_signals(text)
@@ -117,12 +117,12 @@ class TestReviewSignalParsing:
         assert signals["surprise"] == pytest.approx(-0.2)
 
     def test_parse_empty_review(self):
-        from symbiosis.species.neural_dreamer import _parse_review_signals
+        from library.species.neural_dreamer import _parse_review_signals
 
         assert _parse_review_signals("") == {}
 
     def test_parse_no_signals(self):
-        from symbiosis.species.neural_dreamer import _parse_review_signals
+        from library.species.neural_dreamer import _parse_review_signals
 
         assert _parse_review_signals("Just some text with no numbers.") == {}
 
@@ -134,7 +134,7 @@ class TestReviewSignalParsing:
 
 class TestNeuralDreamerHeartbeat:
     def test_heartbeat_runs_think_and_sleep(self):
-        from symbiosis.species import neural_dreamer as nd_mod
+        from library.species import neural_dreamer as nd_mod
 
         files = {
             "thinking.md": "# Thinking\n\nexisting thoughts",
@@ -176,7 +176,7 @@ class TestNeuralDreamerHeartbeat:
 
     def test_heartbeat_includes_graph_map_tools(self):
         """Verify thinking session receives graph and map tool schemas."""
-        from symbiosis.species import neural_dreamer as nd_mod
+        from library.species import neural_dreamer as nd_mod
 
         files = {
             "thinking.md": "", "sleep.md": "", "reviews.md": "",
@@ -203,7 +203,7 @@ class TestNeuralDreamerHeartbeat:
 
     def test_heartbeat_graph_tool_during_thinking(self):
         """Verify graph tools work during thinking session."""
-        from symbiosis.species import neural_dreamer as nd_mod
+        from library.species import neural_dreamer as nd_mod
 
         files = {
             "thinking.md": "", "sleep.md": "", "reviews.md": "",
@@ -220,6 +220,10 @@ class TestNeuralDreamerHeartbeat:
             LLMResponse(message="", tool_calls=[
                 ToolCall(id="t2", name="done", arguments={}),
             ]),
+            # Subconscious phase → concerns.md
+            LLMResponse(message="Concern about trust.", tool_calls=[]),
+            # Dreaming phase → dreams.md
+            LLMResponse(message="Dream of the trust node.", tool_calls=[]),
             # Sleep phase
             LLMResponse(message="sleep output", tool_calls=[]),
         ])
@@ -239,7 +243,7 @@ class TestNeuralDreamerHeartbeat:
 
 class TestNeuralDreamerOnMessage:
     def test_on_message_four_phases_and_send(self):
-        from symbiosis.species import neural_dreamer as nd_mod
+        from library.species import neural_dreamer as nd_mod
 
         files = {
             "thinking.md": "some thoughts",
@@ -272,7 +276,7 @@ class TestNeuralDreamerOnMessage:
         assert "success: 0.8" in reviews
 
     def test_on_message_no_events_returns_early(self):
-        from symbiosis.species import neural_dreamer as nd_mod
+        from library.species import neural_dreamer as nd_mod
 
         ctx = make_mock_ctx()
         nd_mod.on_message(ctx, [])
@@ -280,7 +284,7 @@ class TestNeuralDreamerOnMessage:
         ctx.send.assert_not_called()
 
     def test_on_message_empty_response_not_sent(self):
-        from symbiosis.species import neural_dreamer as nd_mod
+        from library.species import neural_dreamer as nd_mod
 
         files = {
             "thinking.md": "", "sleep.md": "", "reviews.md": "",
@@ -302,7 +306,7 @@ class TestNeuralDreamerOnMessage:
         ctx.send.assert_not_called()
 
     def test_on_message_accumulates_reviews(self):
-        from symbiosis.species import neural_dreamer as nd_mod
+        from library.species import neural_dreamer as nd_mod
 
         files = {
             "thinking.md": "", "sleep.md": "",
@@ -345,7 +349,7 @@ except ImportError:
 class TestNNIntegration:
     def test_on_message_updates_fast_net(self):
         """After on_message, fast net checkpoint should exist."""
-        from symbiosis.species import neural_dreamer as nd_mod
+        from library.species import neural_dreamer as nd_mod
 
         files = {
             "thinking.md": "", "sleep.md": "", "reviews.md": "",
@@ -374,7 +378,7 @@ class TestNNIntegration:
 
     def test_heartbeat_updates_slow_net(self):
         """After heartbeat, slow net checkpoint should exist."""
-        from symbiosis.species import neural_dreamer as nd_mod
+        from library.species import neural_dreamer as nd_mod
 
         files = {
             "thinking.md": "", "reviews.md": "",
@@ -393,6 +397,10 @@ class TestNNIntegration:
             LLMResponse(message="", tool_calls=[
                 ToolCall(id="t1", name="done", arguments={}),
             ]),
+            # Subconscious phase → concerns.md
+            LLMResponse(message="Some concerns.", tool_calls=[]),
+            # Dreaming phase → dreams.md
+            LLMResponse(message="Dream of the slow net.", tool_calls=[]),
             # sleep phase: output with signal-like lines
             LLMResponse(
                 message="session_coherence: 0.8\nintention_alignment: 0.6\nI felt engaged throughout.",
@@ -408,10 +416,10 @@ class TestNNIntegration:
 
     def test_nn_weights_used_when_available(self):
         """When nets exist, their output should override default weights."""
-        from symbiosis.species.neural_dreamer import (
+        from library.species.neural_dreamer import (
             _load_weights_and_variables, _DEFAULT_WEIGHTS, _FAST_SEGMENT_IDS, _SLOW_SEGMENT_IDS,
         )
-        from symbiosis.toolkit.neural import (
+        from library.tools.neural import (
             Net, make_fast_net_config, make_slow_net_config,
             save_fast_net, save_slow_net,
         )
@@ -453,7 +461,7 @@ class TestNNIntegration:
 
 class TestIntrospection:
     def test_introspect_returns_species_description(self):
-        from symbiosis.toolkit.tools import handle_tool
+        from library.tools.tools import handle_tool
 
         ctx = make_mock_ctx()
         ctx.species_id = "neural_dreamer"
@@ -478,15 +486,15 @@ class TestIntrospection:
 
 class TestGraphMapSummary:
     def test_empty_graph_and_map(self):
-        from symbiosis.species.neural_dreamer import _graph_map_summary
+        from library.species.neural_dreamer import _graph_map_summary
 
         ctx = make_mock_ctx({"graph.json": "", "activation_map.json": ""})
         result = _graph_map_summary(ctx)
         assert result == ""
 
     def test_with_graph_data(self):
-        from symbiosis.species.neural_dreamer import _graph_map_summary
-        from symbiosis.toolkit.graph import SemanticGraph
+        from library.species.neural_dreamer import _graph_map_summary
+        from library.tools.graph import SemanticGraph
 
         g = SemanticGraph()
         g.add_node("trust", "Trust")

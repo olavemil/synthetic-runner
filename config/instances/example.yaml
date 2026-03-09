@@ -1,0 +1,17 @@
+species: draum
+provider: anthropic
+model: claude-opus-4-6
+
+messaging:
+  adapter: matrix-main
+  entity_id: "@example-bot:matrix.org"
+  access_token: ${EXAMPLE_MATRIX_TOKEN}
+  spaces:
+    - name: main
+      handle: "!exampleroom:matrix.org"
+    - name: agents
+      handle: "!agentsroom:matrix.org"
+
+schedule:
+  heartbeat: "0 * * * *"
+  max_idle_heartbeats: 3    # skip heartbeat after 3 idle cycles (no new messages)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from symbiosis.matrix_cli import main
+from library.matrix_cli import main
 
 
 def _input_from(values: list[str]):
@@ -24,7 +24,7 @@ class TestMatrixCLI:
                 ]
             ),
         )
-        monkeypatch.setattr("symbiosis.matrix_cli.getpass.getpass", lambda _prompt="": "pw")
+        monkeypatch.setattr("library.matrix_cli.getpass.getpass", lambda _prompt="": "pw")
 
         captured = {}
 
@@ -37,7 +37,7 @@ class TestMatrixCLI:
             )
             return "token-123"
 
-        monkeypatch.setattr("symbiosis.matrix_cli.MatrixAdapter.login", _fake_login)
+        monkeypatch.setattr("library.matrix_cli.MatrixAdapter.login", _fake_login)
 
         rc = main(["login", "--base-dir", str(tmp_path)])
 
@@ -64,7 +64,7 @@ class TestMatrixCLI:
                 ]
             ),
         )
-        monkeypatch.setattr("symbiosis.matrix_cli.getpass.getpass", lambda _prompt="": "pw")
+        monkeypatch.setattr("library.matrix_cli.getpass.getpass", lambda _prompt="": "pw")
 
         captured = {}
 
@@ -72,7 +72,7 @@ class TestMatrixCLI:
             captured["homeserver"] = homeserver
             return "token-xyz"
 
-        monkeypatch.setattr("symbiosis.matrix_cli.MatrixAdapter.login", _fake_login)
+        monkeypatch.setattr("library.matrix_cli.MatrixAdapter.login", _fake_login)
 
         rc = main(["login", "--base-dir", str(tmp_path)])
 

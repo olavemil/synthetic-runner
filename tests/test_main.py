@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from symbiosis.__main__ import _is_template_instance_file, load_species
+from library.__main__ import _is_template_instance_file, load_species
 
 
 class TestMainHelpers:

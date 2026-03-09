@@ -2,7 +2,7 @@
 
 import pytest
 
-from symbiosis.harness.store import NamespacedStore, StoreDB, open_store
+from library.harness.store import NamespacedStore, StoreDB, open_store
 
 
 class TestStoreDB:

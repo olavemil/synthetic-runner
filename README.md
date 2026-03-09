@@ -99,7 +99,7 @@ Each instance gets its own `access_token` — multiple instances can use the sam
 ```bash
 uv run symbiosis
 # or
-uv run python -m symbiosis
+uv run python -m library
 ```
 
 Options:
@@ -130,12 +130,12 @@ uv run pytest
 
 A Species is a Python class that defines agent behavior. It exports a manifest telling the harness what entry points, tools, and default files it needs.
 
-### 1. Create the species file
+### 1. Create the species package
 
 ```python
-# symbiosis/species/my_species.py
+# library/species/my_species/__init__.py
 
-from symbiosis.species import Species, SpeciesManifest, EntryPoint
+from library.species import Species, SpeciesManifest, EntryPoint
 
 DEFAULT_FILES = {
     "notes.md": "# Notes\n",
@@ -175,20 +175,9 @@ class MySpecies(Species):
                 ctx.write(path, content)
 ```
 
-### 2. Register it in the loader
+### 2. Species are auto-discovered
 
-Add your species to `symbiosis/__main__.py`:
-
-```python
-def load_species(species_id):
-    if species_id == "draum":
-        from symbiosis.species.draum import DraumSpecies
-        return DraumSpecies()
-    if species_id == "my-species":
-        from symbiosis.species.my_species import MySpecies
-        return MySpecies()
-    raise ValueError(f"Unknown species: {species_id}")
-```
+Species are automatically discovered from `library/species/` — no manual registration needed. Just create the package and the loader finds it.
 
 ### 3. Create an instance config
 
@@ -232,10 +221,10 @@ All species code interacts with infrastructure through `ctx`:
 
 ### Reusable patterns
 
-The toolkit provides patterns you can compose in your entry points:
+The tools layer provides patterns you can compose in your entry points:
 
 ```python
-from symbiosis.toolkit.patterns import (
+from library.tools.patterns import (
     gut_response,       # Quick assessment of incoming events
     plan_response,      # Deliberate planning step
     compose_response,   # Final message composition
@@ -251,7 +240,7 @@ All patterns take `ctx` as their first argument. Use them directly or build your
 
 ### YAML pipelines
 
-Simple species can be defined declaratively without Python — see `IMPLEMENTATION.md` section 7 for the pipeline format.
+Simple species can be defined declaratively without Python — see `docs/implementation.md` section 7 for the pipeline format.
 
 ## Running multiple instances
 

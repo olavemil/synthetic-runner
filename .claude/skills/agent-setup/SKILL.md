@@ -10,9 +10,9 @@ user_invocable: true
 
 Symbiosis uses three layers with strict separation:
 
-1. **Harness** (`symbiosis/harness/`) — Infrastructure: config, storage, SQLite store, LLM providers, messaging adapters, job queue, checker, worker, scheduler. Knows nothing about agent behavior.
+1. **Harness** (`library/harness/`) — Infrastructure: config, storage, SQLite store, LLM providers, messaging adapters, job queue, checker, worker, scheduler. Knows nothing about agent behavior.
 
-2. **Species** (`symbiosis/species/`) — Stateless behavior code. Defines what an agent type *does*. Exports a `SpeciesManifest` with entry points, tools, default files, and a spawn function. Handlers receive `(ctx: InstanceContext, ...)`.
+2. **Species** (`library/species/`) — Stateless behavior code. Defines what an agent type *does*. Exports a `SpeciesManifest` with entry points, tools, default files, and a spawn function. Handlers receive `(ctx: InstanceContext, ...)`.
 
 3. **Instance** — Pure data: a YAML config file + namespaced file storage. No code. Each instance declares which species it uses and how it connects to infrastructure.
 
@@ -93,7 +93,7 @@ See `neural-dreamer.md` in this skill directory for full architecture details.
 A species is a class extending `Species` that returns a `SpeciesManifest`:
 
 ```python
-from symbiosis.species import Species, SpeciesManifest, EntryPoint
+from library.species import Species, SpeciesManifest, EntryPoint
 
 class MySpecies(Species):
     def manifest(self) -> SpeciesManifest:

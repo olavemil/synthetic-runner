@@ -128,7 +128,7 @@ messaging:
 ## File Structure
 
 ```
-symbiosis/species/neural_dreamer/
+library/species/neural_dreamer/
   __init__.py           # Species class + handlers
   heartbeat.yaml        # Slow cycle pipeline (think + sleep)
   on_message.yaml       # Fast cycle pipeline (gut + suggest + reply + review)
@@ -151,7 +151,7 @@ symbiosis/species/neural_dreamer/
 
 ## Toolkit Dependencies
 
-All in `symbiosis/toolkit/`:
+All in `library/tools/`:
 
 | Module | Purpose | Used by |
 |--------|---------|---------|

@@ -18,9 +18,14 @@ build/
 config/instances/*.yaml
 !config/instances/example.yaml
 
-# Runtime data — databases, instance memory, inboxes
+# Runtime data — databases, inboxes, binary files
 *.db
-instances/
+instances/*/inbox/
+instances/*/memory/**/*.pt
+instances/*/memory/**/*.json
+
+# Build output
+_site/
 
 # IDE
 .idea/

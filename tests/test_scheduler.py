@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from symbiosis.harness.config import (
+from library.harness.config import (
     HarnessConfig,
     ProviderConfig,
     AdapterConfig,
@@ -14,9 +14,9 @@ from symbiosis.harness.config import (
     MessagingConfig,
     SpaceMapping,
 )
-from symbiosis.harness.registry import Registry
-from symbiosis.harness.scheduler import Scheduler, build_providers, build_adapters
-from symbiosis.species import Species, SpeciesManifest, EntryPoint
+from library.harness.registry import Registry
+from library.harness.scheduler import Scheduler, build_providers, build_adapters
+from library.species import Species, SpeciesManifest, EntryPoint
 
 
 class MockSpecies(Species):
@@ -120,7 +120,7 @@ class TestScheduler:
 
     def test_dispatch_with_events(self, tmp_path):
         scheduler, species = self._make_scheduler(tmp_path)
-        from symbiosis.harness.adapters import Event
+        from library.harness.adapters import Event
         events = [Event(event_id="1", sender="alice", body="hi", timestamp=1000)]
         scheduler._dispatch("test-1", "on_message", events=events)
         assert len(species.on_message_calls) == 1
@@ -171,7 +171,7 @@ class TestScheduler:
         assert "test-1:unknown_entrypoint" not in scheduler._schedule_state
 
     def test_poll_reactive_normalizes_room_to_logical_space(self, tmp_path):
-        from symbiosis.harness.adapters import Event
+        from library.harness.adapters import Event
 
         harness_config = HarnessConfig(
             providers=[ProviderConfig(id="mock-provider", type="openai_compat", base_url="http://localhost", api_key="key")],

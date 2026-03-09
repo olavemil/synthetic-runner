@@ -7,8 +7,8 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
-from symbiosis.harness.adapters import Event
-from symbiosis.harness.providers import LLMResponse, ToolCall
+from library.harness.adapters import Event
+from library.harness.providers import LLMResponse, ToolCall
 
 
 def make_mock_ctx(files=None):
@@ -32,7 +32,7 @@ def make_mock_ctx(files=None):
 
 class TestLlmGenerate:
     def test_single_call_returns_stripped_text(self):
-        from symbiosis.toolkit.patterns import llm_generate
+        from library.tools.patterns import llm_generate
 
         ctx = make_mock_ctx()
         ctx.llm = MagicMock(return_value=LLMResponse(message="  hello world  ", tool_calls=[]))
@@ -43,7 +43,7 @@ class TestLlmGenerate:
         assert call_kwargs["caller"] == "llm_generate"
 
     def test_context_prepended_to_content(self):
-        from symbiosis.toolkit.patterns import llm_generate
+        from library.tools.patterns import llm_generate
 
         ctx = make_mock_ctx()
         captured = {}
@@ -58,7 +58,7 @@ class TestLlmGenerate:
         assert "content" in captured["content"]
 
     def test_no_context_sends_content_only(self):
-        from symbiosis.toolkit.patterns import llm_generate
+        from library.tools.patterns import llm_generate
 
         ctx = make_mock_ctx()
         captured = {}
@@ -79,7 +79,7 @@ class TestLlmGenerate:
 
 class TestThinkingSession:
     def test_append_thinking_writes_to_file(self):
-        from symbiosis.toolkit.patterns import thinking_session
+        from library.tools.patterns import thinking_session
 
         files = {"thinking.md": "# Old thoughts"}
         ctx = make_mock_ctx(files)
@@ -104,7 +104,7 @@ class TestThinkingSession:
         assert "new thought" in written
 
     def test_replace_thinking_overwrites_file(self):
-        from symbiosis.toolkit.patterns import thinking_session
+        from library.tools.patterns import thinking_session
 
         files = {"thinking.md": "old stuff"}
         ctx = make_mock_ctx(files)
@@ -125,7 +125,7 @@ class TestThinkingSession:
         assert files["thinking.md"] == "fresh start"
 
     def test_done_stops_loop(self):
-        from symbiosis.toolkit.patterns import thinking_session
+        from library.tools.patterns import thinking_session
 
         ctx = make_mock_ctx()
         call_count = 0
@@ -144,7 +144,7 @@ class TestThinkingSession:
         assert call_count == 1
 
     def test_no_tool_calls_stops_loop(self):
-        from symbiosis.toolkit.patterns import thinking_session
+        from library.tools.patterns import thinking_session
 
         ctx = make_mock_ctx()
         ctx.llm = MagicMock(return_value=LLMResponse(message="no tools", tool_calls=[]))
@@ -159,7 +159,7 @@ class TestThinkingSession:
 
 class TestFormatContext:
     def test_builds_labeled_block(self):
-        from symbiosis.toolkit.patterns import format_context
+        from library.tools.patterns import format_context
 
         files = {"thinking.md": "thoughts here", "dreams.md": "dream content"}
         ctx = make_mock_ctx(files)
@@ -170,7 +170,7 @@ class TestFormatContext:
         assert "dream content" in result
 
     def test_skips_empty_files(self):
-        from symbiosis.toolkit.patterns import format_context
+        from library.tools.patterns import format_context
 
         files = {"thinking.md": "something", "dreams.md": ""}
         ctx = make_mock_ctx(files)
@@ -179,7 +179,7 @@ class TestFormatContext:
         assert "## Dreams" not in result
 
     def test_returns_empty_string_when_all_empty(self):
-        from symbiosis.toolkit.patterns import format_context
+        from library.tools.patterns import format_context
 
         ctx = make_mock_ctx()
         result = format_context(ctx, [["thinking.md", "Thoughts"]])
@@ -193,7 +193,7 @@ class TestFormatContext:
 
 class TestPipelineFileSource:
     def test_file_source_loads_prompt_file(self, tmp_path):
-        from symbiosis.toolkit.pipeline import resolve_input
+        from library.tools.pipeline import resolve_input
 
         prompt_file = tmp_path / "prompts" / "test.md"
         prompt_file.parent.mkdir()
@@ -205,7 +205,7 @@ class TestPipelineFileSource:
         assert result == "Hello dreamer-1!"
 
     def test_file_source_missing_file(self, tmp_path):
-        from symbiosis.toolkit.pipeline import resolve_input
+        from library.tools.pipeline import resolve_input
 
         ctx = make_mock_ctx()
         state = {"_species_dir": str(tmp_path)}
@@ -213,7 +213,7 @@ class TestPipelineFileSource:
         assert "not found" in result
 
     def test_file_source_no_species_dir(self):
-        from symbiosis.toolkit.pipeline import resolve_input
+        from library.tools.pipeline import resolve_input
 
         ctx = make_mock_ctx()
         result = resolve_input(ctx, "file:prompts/test.md", {})
@@ -222,7 +222,7 @@ class TestPipelineFileSource:
 
 class TestPipelineInitialState:
     def test_initial_state_seeds_pipeline(self):
-        from symbiosis.toolkit.pipeline import run_pipeline, load_pipeline
+        from library.tools.pipeline import run_pipeline, load_pipeline
 
         pipeline = load_pipeline("""
 steps:
@@ -252,13 +252,13 @@ steps:
 
 class TestSubconsciousDreamerManifest:
     def test_species_id(self):
-        from symbiosis.__main__ import load_species
+        from library.__main__ import load_species
 
         s = load_species("subconscious_dreamer")
         assert s.manifest().species_id == "subconscious_dreamer"
 
     def test_entry_points(self):
-        from symbiosis.__main__ import load_species
+        from library.__main__ import load_species
 
         s = load_species("subconscious_dreamer")
         names = [e.name for e in s.manifest().entry_points]
@@ -266,7 +266,7 @@ class TestSubconsciousDreamerManifest:
         assert "heartbeat" in names
 
     def test_default_files(self):
-        from symbiosis.__main__ import load_species
+        from library.__main__ import load_species
 
         s = load_species("subconscious_dreamer")
         files = s.manifest().default_files
@@ -277,7 +277,7 @@ class TestSubconsciousDreamerManifest:
 
 class TestSubconsciousDreamerHeartbeat:
     def test_heartbeat_runs_three_phases(self):
-        from symbiosis.species import subconscious_dreamer as sd_mod
+        from library.species import subconscious_dreamer as sd_mod
 
         ctx = make_mock_ctx({
             "thinking.md": "# Thinking\n\nsome thoughts",
@@ -312,7 +312,7 @@ class TestSubconsciousDreamerHeartbeat:
 
 class TestSubconsciousDreamerOnMessage:
     def test_on_message_sends_reply(self):
-        from symbiosis.species import subconscious_dreamer as sd_mod
+        from library.species import subconscious_dreamer as sd_mod
 
         ctx = make_mock_ctx({
             "thinking.md": "some thoughts",
@@ -334,7 +334,7 @@ class TestSubconsciousDreamerOnMessage:
         assert ctx.send.call_args[0][1] == "Here is my reply."
 
     def test_on_message_no_events_returns_early(self):
-        from symbiosis.species import subconscious_dreamer as sd_mod
+        from library.species import subconscious_dreamer as sd_mod
 
         ctx = make_mock_ctx()
         sd_mod.on_message(ctx, [])
@@ -342,7 +342,7 @@ class TestSubconsciousDreamerOnMessage:
         ctx.send.assert_not_called()
 
     def test_on_message_empty_response_not_sent(self):
-        from symbiosis.species import subconscious_dreamer as sd_mod
+        from library.species import subconscious_dreamer as sd_mod
 
         ctx = make_mock_ctx({
             "thinking.md": "thoughts",

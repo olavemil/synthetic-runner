@@ -1,12 +1,12 @@
-"""Tests for symbiosis.toolkit.deliberate."""
+"""Tests for library.tools.deliberate."""
 
 from __future__ import annotations
 
 import json
 from types import SimpleNamespace
 
-from symbiosis.toolkit.identity import Identity
-from symbiosis.toolkit.deliberate import (
+from library.tools.identity import Identity
+from library.tools.deliberate import (
     generate_with_identity,
     multi_generate,
     multi_vote,
@@ -21,7 +21,7 @@ def _voice(name: str, model: str = "m", personality: str = "p") -> Identity:
 
 
 def _colony_member(name: str, dims: dict | None = None) -> Identity:
-    from symbiosis.toolkit.identity import AXIS_NAMES
+    from library.tools.identity import AXIS_NAMES
     return Identity(
         name=name,
         dims=dims or {n: 0.1 for n in AXIS_NAMES},

@@ -6,7 +6,7 @@ import math
 import pytest
 from unittest.mock import MagicMock
 
-from symbiosis.toolkit.activation_map import (
+from library.tools.activation_map import (
     ActivationMap,
     load_map,
     save_map,

@@ -1,7 +1,7 @@
 """Tests for Draum species behavior."""
 
-from symbiosis.harness.adapters import Event
-from symbiosis.species import draum as draum_mod
+from library.harness.adapters import Event
+from library.species import draum as draum_mod
 
 
 class DummyCtx:

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from symbiosis.harness.config import (
+from library.harness.config import (
     HarnessConfig,
     InstanceConfig,
     load_harness_config,
@@ -90,7 +90,7 @@ class TestLoadHarnessConfig:
             ]
         )
         # Use the dataclass properly
-        from symbiosis.harness.config import ProviderConfig
+        from library.harness.config import ProviderConfig
         config = HarnessConfig(providers=[ProviderConfig(id="a", type="x")])
         assert config.get_provider("a").id == "a"
         with pytest.raises(KeyError):
@@ -173,7 +173,7 @@ class TestSchedulerConfig:
         config_path.parent.mkdir(parents=True)
         config_path.write_text("{}")
 
-        from symbiosis.harness.config import load_harness_config, SchedulerConfig
+        from library.harness.config import load_harness_config, SchedulerConfig
         result = load_harness_config(config_path)
         assert isinstance(result.scheduler, SchedulerConfig)
         assert result.scheduler.check_interval == 300
@@ -192,7 +192,7 @@ class TestSchedulerConfig:
         config_path.parent.mkdir(parents=True)
         config_path.write_text(yaml.dump(config))
 
-        from symbiosis.harness.config import load_harness_config
+        from library.harness.config import load_harness_config
         result = load_harness_config(config_path)
         assert result.scheduler.check_interval == 120
         assert result.scheduler.work_interval == 30
@@ -201,12 +201,12 @@ class TestSchedulerConfig:
 
 class TestProviderMaxConcurrency:
     def test_max_concurrency_field(self):
-        from symbiosis.harness.config import ProviderConfig
+        from library.harness.config import ProviderConfig
         pc = ProviderConfig(id="lmstudio", type="openai_compat", max_concurrency=2)
         assert pc.max_concurrency == 2
 
     def test_max_concurrency_default_none(self):
-        from symbiosis.harness.config import ProviderConfig
+        from library.harness.config import ProviderConfig
         pc = ProviderConfig(id="anthropic", type="anthropic")
         assert pc.max_concurrency is None
 
@@ -221,7 +221,7 @@ class TestProviderMaxConcurrency:
         config_path.parent.mkdir(parents=True)
         config_path.write_text(yaml.dump(config))
 
-        from symbiosis.harness.config import load_harness_config
+        from library.harness.config import load_harness_config
         result = load_harness_config(config_path)
         assert result.providers[0].max_concurrency == 2
         assert result.providers[1].max_concurrency is None

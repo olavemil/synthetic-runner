@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from symbiosis.toolkit.identity import Identity
-from symbiosis.toolkit.hecate import (
+from library.tools.identity import Identity
+from library.tools.hecate import (
     HecateConfig,
     load_config,
 )
@@ -72,7 +72,7 @@ class TestVoteTally:
 
     def test_two_vote_winner(self):
         # Simulating: voices 0 and 1 vote for Sable; voice 2 votes for Aria
-        from symbiosis.toolkit.voting import borda_tally
+        from library.tools.voting import borda_tally
         candidates = {"Aria": "text a", "Sable": "text b", "Lune": "text c"}
         votes = {
             "Aria": ["Sable"],   # Aria votes for Sable
@@ -83,7 +83,7 @@ class TestVoteTally:
         assert tally["winner_member"] == "Sable"
 
     def test_three_way_tie(self):
-        from symbiosis.toolkit.voting import borda_tally
+        from library.tools.voting import borda_tally
         candidates = {"Aria": "text a", "Sable": "text b", "Lune": "text c"}
         # Each voice votes for a different candidate → all same score
         votes = {

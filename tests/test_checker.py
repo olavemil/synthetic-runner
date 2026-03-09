@@ -10,19 +10,19 @@ import httpx
 import pytest
 import yaml
 
-from symbiosis.harness.checker import Checker
-from symbiosis.harness.adapters import Event
-from symbiosis.harness.config import (
+from library.harness.checker import Checker
+from library.harness.adapters import Event
+from library.harness.config import (
     HarnessConfig,
     AdapterConfig,
     InstanceConfig,
     MessagingConfig,
     SpaceMapping,
 )
-from symbiosis.harness.jobqueue import JobQueue
-from symbiosis.harness.registry import Registry
-from symbiosis.harness.store import open_store
-from symbiosis.species import Species, SpeciesManifest, EntryPoint
+from library.harness.jobqueue import JobQueue
+from library.harness.registry import Registry
+from library.harness.store import open_store
+from library.species import Species, SpeciesManifest, EntryPoint
 
 
 _SPECIES_ID = "test-species"

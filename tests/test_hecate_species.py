@@ -5,8 +5,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from symbiosis.harness.adapters import Event
-from symbiosis.species.hecate import on_message, heartbeat
+from library.harness.adapters import Event
+from library.species.hecate import on_message, heartbeat
 
 
 THREE_VOICES_CFG = {
@@ -80,8 +80,8 @@ class TestHecateOnMessage:
             return SimpleNamespace(message="fallback")
 
         ctx = DummyCtx(THREE_VOICES_CFG, llm_fn=llm_fn)
-        with patch("symbiosis.species.hecate.random.shuffle", side_effect=lambda seq: seq.reverse()):
-            with patch("symbiosis.species.hecate.random.choice", side_effect=lambda seq: seq[1]):
+        with patch("library.species.hecate.random.shuffle", side_effect=lambda seq: seq.reverse()):
+            with patch("library.species.hecate.random.choice", side_effect=lambda seq: seq[1]):
                 on_message(ctx, [_event()])
 
         assert len(ctx.sent) == 1
@@ -115,7 +115,7 @@ class TestHecateOnMessage:
             _event(body="main message", room="main", event_id="$1", timestamp=1),
             _event(body="ops message", room="ops", event_id="$2", timestamp=2),
         ]
-        with patch("symbiosis.species.hecate.random.choice", side_effect=lambda seq: seq[0]):
+        with patch("library.species.hecate.random.choice", side_effect=lambda seq: seq[0]):
             on_message(ctx, events)
 
         assert len(ctx.sent) == 1
@@ -141,7 +141,7 @@ class TestHecateOnMessage:
             return SimpleNamespace(message="fallback")
 
         ctx = DummyCtx(THREE_VOICES_CFG, llm_fn=llm_fn)
-        with patch("symbiosis.species.hecate.random.choice", side_effect=lambda seq: seq[0]):
+        with patch("library.species.hecate.random.choice", side_effect=lambda seq: seq[0]):
             on_message(ctx, [_event()])
         assert len(ctx.sent) == 1
         assert ctx.sent[0][1] == "Composed final message."

@@ -7,13 +7,13 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
-from symbiosis.harness.adapters import Event
-from symbiosis.harness.config import HarnessConfig, ProviderConfig, AdapterConfig, InstanceConfig
-from symbiosis.harness.jobqueue import JobQueue
-from symbiosis.harness.registry import Registry
-from symbiosis.harness.store import open_store, NamespacedStore
-from symbiosis.harness.worker import Worker
-from symbiosis.species import Species, SpeciesManifest, EntryPoint
+from library.harness.adapters import Event
+from library.harness.config import HarnessConfig, ProviderConfig, AdapterConfig, InstanceConfig
+from library.harness.jobqueue import JobQueue
+from library.harness.registry import Registry
+from library.harness.store import open_store, NamespacedStore
+from library.harness.worker import Worker
+from library.species import Species, SpeciesManifest, EntryPoint
 
 
 def _make_instance(instance_id, provider="default"):

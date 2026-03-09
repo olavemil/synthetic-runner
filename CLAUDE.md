@@ -7,8 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Symbiosis toolkit** — a framework for building multi-layered LLM agent systems. The implementation is complete and tested.
 
 Key documents:
-- `ARCHITECTURE.md` — Three-layer architecture specification
-- `IMPLEMENTATION.md` — Technical implementation roadmap
+- `docs/architecture.md` — Three-layer architecture specification
+- `docs/implementation.md` — Technical implementation roadmap
 - `proposals/neural_nets/` — Hybrid NN/LLM extension proposals (architecture + memory tools)
 
 ## Commands
@@ -28,8 +28,8 @@ uv run symbiosis run           # legacy continuous loop
 
 Three layers with strict separation:
 
-- **Harness** (`symbiosis/harness/`) — Infrastructure: config, storage, SQLite store, LLM providers, messaging adapters, job queue, checker, worker, scheduler.
-- **Species** (`symbiosis/species/`) — Stateless behavior. Exports a `SpeciesManifest` with `entry_points`, `tools`, `default_files`, `spawn`. Handlers take `(ctx: InstanceContext, ...)`.
+- **Harness** (`library/harness/`) — Infrastructure: config, storage, SQLite store, LLM providers, messaging adapters, job queue, checker, worker, scheduler.
+- **Species** (`library/species/`) — Stateless behavior. Exports a `SpeciesManifest` with `entry_points`, `tools`, `default_files`, `spawn`. Handlers take `(ctx: InstanceContext, ...)`.
 - **Instance** — Pure data: a YAML config + namespaced file storage. No code.
 
 **InstanceContext** is the only interface between Species and Harness:
@@ -78,51 +78,37 @@ config/
 
 | File | Purpose |
 |------|---------|
-| `symbiosis/harness/config.py` | YAML loading with `${VAR}` env resolution |
-| `symbiosis/harness/context.py` | `InstanceContext` — main Species interface |
-| `symbiosis/harness/store.py` | `StoreDB` / `NamespacedStore` (SQLite, `claim`/`release` for atomic ops) |
-| `symbiosis/harness/jobqueue.py` | `JobQueue` — enqueue/claim/complete with instance guards |
-| `symbiosis/harness/checker.py` | `Checker` — poll + schedule check → enqueue |
-| `symbiosis/harness/worker.py` | `Worker` — run-to-empty with provider slot management |
-| `symbiosis/harness/scheduler.py` | Legacy continuous loop (kept for `symbiosis run`) |
-| `symbiosis/scheduling.py` | OS schedule file generation (launchd/systemd/crontab) |
-| `symbiosis/toolkit/patterns.py` | `gut_response`, `plan_response`, `compose_response`, etc. |
-| `symbiosis/toolkit/tools.py` | `make_tools()` / `handle_tool()` |
-| `symbiosis/toolkit/pipeline.py` | YAML pipeline runner |
-| `symbiosis/toolkit/segments.py` | Prompt segment registry, selection vectors, variable injection |
-| `symbiosis/toolkit/graph.py` | Semantic graph tools (persistent directed weighted graph) |
-| `symbiosis/toolkit/activation_map.py` | 2D activation map tools (attention/affect heatmap) |
-| `symbiosis/toolkit/neural.py` | Fast/slow neural net management, checkpoints, signal encoding |
-| `symbiosis/toolkit/rendering.py` | Graph→HTML, Map→PNG/GIF visualization |
-| `symbiosis/species/draum.py` | Draum species: reactive + heartbeat |
-| `symbiosis/species/subconscious_dreamer/` | Subconscious Dreamer: three-phase thinking + response pipelines |
-| `symbiosis/species/neural_dreamer/` | Neural Dreamer: NN-driven prompt configuration + memory tools |
-| `symbiosis/__main__.py` | CLI entry point |
-| `symbiosis/setup_wizard.py` | Interactive setup wizard |
+| `library/harness/config.py` | YAML loading with `${VAR}` env resolution |
+| `library/harness/context.py` | `InstanceContext` — main Species interface |
+| `library/harness/store.py` | `StoreDB` / `NamespacedStore` (SQLite, `claim`/`release` for atomic ops) |
+| `library/harness/jobqueue.py` | `JobQueue` — enqueue/claim/complete with instance guards |
+| `library/harness/checker.py` | `Checker` — poll + schedule check → enqueue |
+| `library/harness/worker.py` | `Worker` — run-to-empty with provider slot management |
+| `library/harness/scheduler.py` | Legacy continuous loop (kept for `symbiosis run`) |
+| `library/scheduling.py` | OS schedule file generation (launchd/systemd/crontab) |
+| `library/tools/patterns.py` | `gut_response`, `plan_response`, `compose_response`, etc. |
+| `library/tools/tools.py` | `make_tools()` / `handle_tool()` |
+| `library/tools/pipeline.py` | YAML pipeline runner |
+| `library/tools/segments.py` | Prompt segment registry, selection vectors, variable injection |
+| `library/tools/graph.py` | Semantic graph tools (persistent directed weighted graph) |
+| `library/tools/activation_map.py` | 2D activation map tools (attention/affect heatmap) |
+| `library/tools/neural.py` | Fast/slow neural net management, checkpoints, signal encoding |
+| `library/tools/rendering.py` | Graph→HTML, Map→PNG/GIF visualization |
+| `library/species/draum/` | Draum species: reactive + heartbeat |
+| `library/species/subconscious_dreamer/` | Subconscious Dreamer: three-phase thinking + response pipelines |
+| `library/species/neural_dreamer/` | Neural Dreamer: NN-driven prompt configuration + memory tools |
+| `library/__main__.py` | CLI entry point |
+| `library/setup_wizard.py` | Interactive setup wizard |
 
-## Neural Net Extension (In Progress)
+## Neural Net Extension
 
 Spec: `proposals/neural_nets/architecture-technical.md` + `proposals/neural_nets/tools-memory-representations.md`
 
-Adds a dual neural network layer and non-textual memory tools on top of the existing pipeline architecture. All new code is **toolkit modules** (opt-in by species), with one small harness addition (`read_binary`/`write_binary`).
-
-### Implementation order
-
-1. Add `ctx.read_binary`/`write_binary` to harness (`context.py`, `storage.py`)
-2. `toolkit/segments.py` — segment registry + selection (manual weights first, NN-driven later)
-3. `toolkit/graph.py` — semantic graph tools, JSON storage via `ctx.write`
-4. `toolkit/activation_map.py` — 2D map tools, JSON storage
-5. Register graph/map tools in `tools.py`
-6. Create `neural_dreamer` species with pipelines, manual segment selection
-7. `toolkit/neural.py` — PyTorch fast/slow nets, checkpoint save/load
-8. Wire NN→segment selection + variable injection
-9. Add review phase to fast cycle; wire LLM→NN structured signals
-10. `toolkit/rendering.py` — graph HTML, map PNG/GIF
-11. NN encoding of graph/map (GNN for graph→slow net, CNN/flatten for map→fast net)
+Adds a dual neural network layer and non-textual memory tools on top of the existing pipeline architecture. All new code is **tools modules** (opt-in by species), with one small harness addition (`read_binary`/`write_binary`).
 
 ### Key design decisions
 
-- **Toolkit not harness:** NN, graph, map, segments are behavioral capabilities, not infrastructure
+- **Tools not harness:** NN, graph, map, segments are behavioral capabilities, not infrastructure
 - **Binary storage:** Small nets (<64 hidden units) stored as binary files via `ctx.read_binary`/`write_binary`
 - **Two nets:** Fast net (shallow, updates per message review) encodes session affect; slow net (deeper, updates at sleep) encodes accumulated disposition
 - **Segment selection:** NN outputs control which pre-written prompt segments are active and in what order — fast net controls state/relational/meta segments, slow net controls identity/temporal/task segments

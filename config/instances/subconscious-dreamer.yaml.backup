@@ -1,0 +1,15 @@
+species: subconscious_dreamer
+provider: lmstudio
+model: mistralai/devstral-small-2-2512
+
+messaging:
+  adapter: matrix-main
+  access_token: ${SUBCONSCIOUS_DREAMER_MATRIX_TOKEN}
+  spaces:
+  - name: main
+    handle: '!KhVcjpFxUhhgxiTCsl:matrix.org'
+  - name: friend-room
+    handle: '!FWKlRhMhCdSMVJUraf:matrix.org'
+
+schedule:
+  heartbeat: '*/19 * * * *'

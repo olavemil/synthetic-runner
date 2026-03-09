@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from symbiosis.toolkit.graph import SemanticGraph
-from symbiosis.toolkit.activation_map import ActivationMap
-from symbiosis.toolkit.rendering import render_graph_html
+from library.tools.graph import SemanticGraph
+from library.tools.activation_map import ActivationMap
+from library.tools.rendering import render_graph_html
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +120,7 @@ except ImportError:
 @pytest.mark.skipif(not HAS_MATPLOTLIB, reason="matplotlib not installed")
 class TestRenderMapPNG:
     def test_returns_png_bytes(self):
-        from symbiosis.toolkit.rendering import render_map_png
+        from library.tools.rendering import render_map_png
 
         m = ActivationMap(8, 8, "x_axis", "y_axis", "test map")
         m.set(4, 4, 0.8)
@@ -130,14 +130,14 @@ class TestRenderMapPNG:
         assert result[:8] == b"\x89PNG\r\n\x1a\n"  # PNG magic bytes
 
     def test_empty_map_renders(self):
-        from symbiosis.toolkit.rendering import render_map_png
+        from library.tools.rendering import render_map_png
 
         m = ActivationMap(4, 4)
         result = render_map_png(m)
         assert len(result) > 100  # Non-trivial PNG
 
     def test_custom_figsize(self):
-        from symbiosis.toolkit.rendering import render_map_png
+        from library.tools.rendering import render_map_png
 
         m = ActivationMap(8, 8, "X", "Y", "test")
         small = render_map_png(m, figsize=(4, 3))
@@ -146,7 +146,7 @@ class TestRenderMapPNG:
         assert len(large) > len(small)
 
     def test_no_contour_on_flat(self):
-        from symbiosis.toolkit.rendering import render_map_png
+        from library.tools.rendering import render_map_png
 
         m = ActivationMap(4, 4)
         # All zeros — contour should not crash
@@ -154,7 +154,7 @@ class TestRenderMapPNG:
         assert isinstance(result, bytes)
 
     def test_diverging_values(self):
-        from symbiosis.toolkit.rendering import render_map_png
+        from library.tools.rendering import render_map_png
 
         m = ActivationMap(8, 8, "fam", "affect", "test diverging")
         m.set_region(2, 2, 2, 0.9, "hard")
@@ -169,7 +169,7 @@ class TestRenderMapPNG:
 )
 class TestRenderMapGIF:
     def test_returns_gif_bytes(self):
-        from symbiosis.toolkit.rendering import render_map_gif
+        from library.tools.rendering import render_map_gif
 
         grids = [
             ("frame_1", [[0.0, 0.5], [0.3, -0.2]]),
@@ -181,20 +181,20 @@ class TestRenderMapGIF:
         assert result[:6] in (b"GIF87a", b"GIF89a")
 
     def test_single_frame(self):
-        from symbiosis.toolkit.rendering import render_map_gif
+        from library.tools.rendering import render_map_gif
 
         grids = [("only", [[0.5, -0.5], [0.0, 0.0]])]
         result = render_map_gif(grids, width=2, height=2)
         assert isinstance(result, bytes)
 
     def test_empty_raises(self):
-        from symbiosis.toolkit.rendering import render_map_gif
+        from library.tools.rendering import render_map_gif
 
         with pytest.raises(ValueError, match="at least one grid"):
             render_map_gif([])
 
     def test_with_labels(self):
-        from symbiosis.toolkit.rendering import render_map_gif
+        from library.tools.rendering import render_map_gif
 
         grids = [
             ("start", [[0.0] * 4 for _ in range(4)]),

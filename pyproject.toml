@@ -26,8 +26,11 @@ dev = [
 ]
 
 [project.scripts]
-symbiosis = "symbiosis.__main__:main"
-matrix = "symbiosis.matrix_cli:main"
+symbiosis = "library.__main__:main"
+matrix = "library.matrix_cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["library"]
 
 [build-system]
 requires = ["hatchling"]

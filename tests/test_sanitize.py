@@ -1,6 +1,6 @@
-"""Tests for symbiosis.harness.sanitize."""
+"""Tests for library.harness.sanitize."""
 
-from symbiosis.harness.sanitize import strip_think_blocks
+from library.harness.sanitize import strip_think_blocks
 
 
 class TestStripThinkBlocks:

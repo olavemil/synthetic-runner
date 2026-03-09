@@ -5,10 +5,10 @@ from __future__ import annotations
 import logging
 from types import SimpleNamespace
 
-from symbiosis.harness.adapters import Event
-from symbiosis.harness.store import open_store, NamespacedStore
-from symbiosis.species.thrivemind import on_message, heartbeat
-from symbiosis.toolkit.thrivemind import AXIS_NAMES, Individual
+from library.harness.adapters import Event
+from library.harness.store import open_store, NamespacedStore
+from library.species.thrivemind import on_message, heartbeat
+from library.tools.thrivemind import AXIS_NAMES, Individual
 
 
 class DummyCtx:
@@ -163,7 +163,7 @@ class TestThrivemindOnMessage:
         events = [_make_event("discuss")]
 
         # Pre-populate colony with 4 individuals, each with distinct IDs
-        from symbiosis.toolkit.thrivemind import spawn_initial_colony, save_colony, ThrivemindConfig
+        from library.tools.thrivemind import spawn_initial_colony, save_colony, ThrivemindConfig
         colony_cfg = ThrivemindConfig(colony_size=4)
         colony = spawn_initial_colony(colony_cfg)
         save_colony(ctx, colony)
@@ -323,8 +323,8 @@ class TestThrivemindHeartbeat:
         ctx = DummyCtx("inst-spawn", db, cfg)
 
         # Pre-populate with some eligible individuals
-        from symbiosis.toolkit.thrivemind import ThrivemindConfig, spawn_initial_colony, save_colony
-        from symbiosis.toolkit.thrivemind import load_colony
+        from library.tools.thrivemind import ThrivemindConfig, spawn_initial_colony, save_colony
+        from library.tools.thrivemind import load_colony
         colony_cfg = ThrivemindConfig(colony_size=6, approval_threshold=2)
         colony = spawn_initial_colony(colony_cfg)
         # Give 2 individuals enough approval to trigger spawn

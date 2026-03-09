@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from symbiosis.scheduling import (
+from library.scheduling import (
     detect_scheduler,
     generate_crontab,
     generate_launchd,

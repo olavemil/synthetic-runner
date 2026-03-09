@@ -4,8 +4,8 @@ import time
 
 import pytest
 
-from symbiosis.harness.jobqueue import Job, JobQueue
-from symbiosis.harness.store import open_store
+from library.harness.jobqueue import Job, JobQueue
+from library.harness.store import open_store
 
 
 @pytest.fixture
