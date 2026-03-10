@@ -202,6 +202,201 @@ def render_graph_html(
 
 
 # ---------------------------------------------------------------------------
+# Map → HTML (no external dependencies)
+# ---------------------------------------------------------------------------
+
+_MAP_HTML_TEMPLATE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{title}</title>
+<style>
+  body {{ margin: 0; background: #1a1a2e; color: #e0e0e0; font-family: sans-serif;
+         display: flex; flex-direction: column; align-items: center; padding: 20px; }}
+  h1 {{ font-size: 16px; margin: 0 0 4px; color: #e94560; }}
+  .description {{ font-size: 12px; color: #888; margin-bottom: 12px; }}
+  .map-container {{ position: relative; display: inline-block; }}
+  canvas {{ border: 1px solid #0f3460; cursor: crosshair; }}
+  .axis-label {{ font-size: 12px; color: #aaa; }}
+  .x-label {{ text-align: center; margin-top: 6px; }}
+  .y-label {{ writing-mode: vertical-rl; transform: rotate(180deg);
+              position: absolute; left: -24px; top: 50%; transform-origin: center;
+              transform: rotate(180deg) translateX(50%); }}
+  .tooltip {{
+    position: fixed; background: #16213e; border: 1px solid #0f3460;
+    padding: 4px 8px; border-radius: 4px; font-size: 11px;
+    pointer-events: none; opacity: 0; transition: opacity 0.1s;
+    white-space: nowrap;
+  }}
+  .legend {{ display: flex; align-items: center; margin-top: 10px; font-size: 11px; gap: 6px; }}
+  .legend canvas {{ border: none; cursor: default; }}
+  .snapshots {{ margin-top: 16px; display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }}
+  .snapshots button {{
+    background: #16213e; color: #ccc; border: 1px solid #0f3460;
+    padding: 4px 10px; border-radius: 3px; cursor: pointer; font-size: 11px;
+  }}
+  .snapshots button:hover {{ background: #0f3460; }}
+  .snapshots button.active {{ background: #e94560; border-color: #e94560; color: #fff; }}
+</style>
+</head>
+<body>
+<h1>{title}</h1>
+<div class="description">{description}</div>
+<div class="map-container">
+  <div class="y-label axis-label">{y_label}</div>
+  <canvas id="map" width="{canvas_w}" height="{canvas_h}"></canvas>
+  <div class="x-label axis-label">{x_label}</div>
+</div>
+<div class="legend">
+  <span>-1.0</span>
+  <canvas id="legend" width="200" height="14"></canvas>
+  <span>+1.0</span>
+</div>
+<div class="tooltip" id="tooltip"></div>
+<div class="snapshots" id="snapshots"></div>
+<script>
+const gridData = {grid_json};
+const snapshots = {snapshots_json};
+const W = {grid_w}, H = {grid_h};
+const cellSize = {cell_size};
+const canvas = document.getElementById("map");
+const ctx = canvas.getContext("2d");
+const tooltip = document.getElementById("tooltip");
+
+function valueToColor(v) {{
+  // Diverging: blue (-1) → white (0) → red (+1)
+  v = Math.max(-1, Math.min(1, v));
+  let r, g, b;
+  if (v < 0) {{
+    const t = 1 + v; // 0..1
+    r = Math.round(59 + t * 196);
+    g = Math.round(76 + t * 179);
+    b = Math.round(192 + t * 63);
+  }} else {{
+    const t = v;
+    r = 255;
+    g = Math.round(255 - t * 162);
+    b = Math.round(255 - t * 168);
+  }}
+  return `rgb(${{r}},${{g}},${{b}})`;
+}}
+
+function drawGrid(grid) {{
+  for (let y = 0; y < H; y++) {{
+    for (let x = 0; x < W; x++) {{
+      const val = grid[H - 1 - y][x]; // flip Y so 0 is bottom
+      ctx.fillStyle = valueToColor(val);
+      ctx.fillRect(x * cellSize, y * cellSize, cellSize, cellSize);
+    }}
+  }}
+  // Grid lines
+  ctx.strokeStyle = "rgba(255,255,255,0.06)";
+  ctx.lineWidth = 0.5;
+  for (let x = 0; x <= W; x++) {{
+    ctx.beginPath(); ctx.moveTo(x * cellSize, 0); ctx.lineTo(x * cellSize, H * cellSize); ctx.stroke();
+  }}
+  for (let y = 0; y <= H; y++) {{
+    ctx.beginPath(); ctx.moveTo(0, y * cellSize); ctx.lineTo(W * cellSize, y * cellSize); ctx.stroke();
+  }}
+}}
+
+drawGrid(gridData);
+
+// Legend bar
+const lctx = document.getElementById("legend").getContext("2d");
+for (let i = 0; i < 200; i++) {{
+  lctx.fillStyle = valueToColor((i / 199) * 2 - 1);
+  lctx.fillRect(i, 0, 1, 14);
+}}
+
+// Tooltip on hover
+canvas.addEventListener("mousemove", (e) => {{
+  const rect = canvas.getBoundingClientRect();
+  const cx = Math.floor((e.clientX - rect.left) / cellSize);
+  const cy = Math.floor((e.clientY - rect.top) / cellSize);
+  if (cx >= 0 && cx < W && cy >= 0 && cy < H) {{
+    const gy = H - 1 - cy;
+    const val = gridData[gy][cx];
+    tooltip.style.opacity = 1;
+    tooltip.innerHTML = `(${{cx}}, ${{gy}}) = ${{val.toFixed(3)}}`;
+    tooltip.style.left = (e.clientX + 14) + "px";
+    tooltip.style.top = (e.clientY - 10) + "px";
+  }} else {{
+    tooltip.style.opacity = 0;
+  }}
+}});
+canvas.addEventListener("mouseleave", () => {{ tooltip.style.opacity = 0; }});
+
+// Snapshot buttons
+if (snapshots.length > 0) {{
+  const container = document.getElementById("snapshots");
+  const currentBtn = document.createElement("button");
+  currentBtn.textContent = "Current";
+  currentBtn.className = "active";
+  currentBtn.onclick = () => {{
+    drawGrid(gridData);
+    container.querySelectorAll("button").forEach(b => b.className = "");
+    currentBtn.className = "active";
+  }};
+  container.appendChild(currentBtn);
+  snapshots.forEach((snap, i) => {{
+    const btn = document.createElement("button");
+    btn.textContent = snap.label || ("Snapshot " + (i + 1));
+    btn.onclick = () => {{
+      drawGrid(snap.grid);
+      container.querySelectorAll("button").forEach(b => b.className = "");
+      btn.className = "active";
+    }};
+    container.appendChild(btn);
+  }});
+}}
+</script>
+</body>
+</html>
+"""
+
+
+def render_map_html(
+    m: ActivationMap,
+    title: str = "Activation Map",
+    cell_size: int = 0,
+) -> str:
+    """Render an ActivationMap as self-contained HTML with canvas heatmap.
+
+    No external dependencies required. Returns the HTML string.
+    """
+    # Auto-size cells: aim for ~400-600px canvas
+    if cell_size <= 0:
+        cell_size = max(4, min(32, 512 // max(m.width, m.height)))
+
+    canvas_w = m.width * cell_size
+    canvas_h = m.height * cell_size
+
+    # Prepare snapshot data (only include grid + label)
+    snap_data = []
+    for snap in (m.snapshots or []):
+        if isinstance(snap, dict) and "grid" in snap:
+            snap_data.append({"label": snap.get("label", ""), "grid": snap["grid"]})
+
+    description = m.description or f"{m.width}x{m.height} grid"
+
+    return _MAP_HTML_TEMPLATE.format(
+        title=html.escape(title),
+        description=html.escape(description),
+        x_label=html.escape(m.x_label or "X"),
+        y_label=html.escape(m.y_label or "Y"),
+        grid_json=json.dumps(m.grid),
+        snapshots_json=json.dumps(snap_data),
+        grid_w=m.width,
+        grid_h=m.height,
+        cell_size=cell_size,
+        canvas_w=canvas_w,
+        canvas_h=canvas_h,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Map → PNG / GIF (requires matplotlib)
 # ---------------------------------------------------------------------------
 

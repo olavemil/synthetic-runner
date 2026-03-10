@@ -104,24 +104,30 @@ def render_and_publish(ctx: InstanceContext) -> None:
     if map_json:
         try:
             from library.tools.activation_map import ActivationMap
-            from library.tools.rendering import render_map_png
+            from library.tools.rendering import render_map_html
 
             m = ActivationMap.from_json(map_json)
             if m.width > 0:
-                png = render_map_png(m)
-                publish_file(ctx, "map.png", png)
-                published.append("map.png")
+                map_html = render_map_html(m, title=f"{ctx.instance_id} — Activation Map")
+                publish_file(ctx, "map.html", map_html)
+                published.append("map.html")
 
-                # Render GIF from snapshots if available
-                if m.snapshots:
-                    from library.tools.rendering import render_map_gif
-                    grids = [(s.get("label", ""), s["grid"]) for s in m.snapshots if "grid" in s]
-                    if grids:
-                        gif = render_map_gif(grids)
-                        publish_file(ctx, "map_session.gif", gif)
-                        published.append("map_session.gif")
-        except ImportError:
-            logger.debug("Skipping map render (matplotlib/Pillow not installed)")
+                # Also render PNG/GIF if matplotlib is available
+                try:
+                    from library.tools.rendering import render_map_png
+                    png = render_map_png(m)
+                    publish_file(ctx, "map.png", png)
+                    published.append("map.png")
+
+                    if m.snapshots:
+                        from library.tools.rendering import render_map_gif
+                        grids = [(s.get("label", ""), s["grid"]) for s in m.snapshots if "grid" in s]
+                        if grids:
+                            gif = render_map_gif(grids)
+                            publish_file(ctx, "map_session.gif", gif)
+                            published.append("map_session.gif")
+                except ImportError:
+                    pass  # HTML version is sufficient
         except Exception as exc:
             logger.warning("Failed to render map: %s", exc)
 

@@ -795,7 +795,7 @@ def rewrite_constitution(
     target_words = max(20, min(500, input_word_count))
     min_words = max(12, int(target_words * 0.7))
     max_words = max(min_words + 8, int(target_words * 1.3))
-    rewrite_max_tokens = max(2048, min(8192, max_words * 4))
+    rewrite_max_tokens = max(2048, min(8192, max_words * 8))
 
     # Use a writer identity with the writer model
     provider, model = parse_model(cfg.writer_model) if cfg.writer_model else (None, "")

@@ -46,9 +46,15 @@ def _init_data_repo(repo_path: Path, branch: str) -> None:
     logger.info("Initialized data repo at %s", repo_path)
 
 
+def _display_name(stem: str) -> str:
+    """Convert a file stem to a human-readable display name."""
+    return stem.replace("_", " ").replace("-", " ").title()
+
+
 def _write_index_files(out_dir: Path) -> int:
     """Generate index.md files for each instance directory.
 
+    Groups files by subdirectory and separates visualizations.
     Returns number of files written (only counts changed files).
     """
     written = 0
@@ -70,13 +76,38 @@ def _write_index_files(out_dir: Path) -> int:
             f"# {instance_dir.name}",
             "",
         ]
+
+        # Group files by parent directory relative to instance_dir
+        root_files: list[Path] = []
+        subdirs: dict[str, list[Path]] = {}
         for md_file in md_files:
             rel = md_file.relative_to(instance_dir)
-            display = rel.stem.replace("_", " ").replace("-", " ").title()
-            link = str(rel.with_suffix(""))
+            if len(rel.parts) == 1:
+                root_files.append(md_file)
+            else:
+                subdir = rel.parts[0]
+                if subdir.startswith("_"):
+                    continue  # skip _published etc.
+                subdirs.setdefault(subdir, []).append(md_file)
+
+        # Root-level files
+        for md_file in root_files:
+            display = _display_name(md_file.stem)
+            link = str(md_file.relative_to(instance_dir).with_suffix(""))
             lines.append(f"- [{display}]({link})")
 
-        # Link to published HTML files (graphs, visualizations)
+        # Subdirectories as sections
+        for subdir_name in sorted(subdirs):
+            files = subdirs[subdir_name]
+            lines.append("")
+            lines.append(f"### {_display_name(subdir_name)} ({len(files)})")
+            lines.append("")
+            for md_file in files:
+                rel = md_file.relative_to(instance_dir)
+                display = _display_name(md_file.stem)
+                lines.append(f"- [{display}]({rel.with_suffix('')})")
+
+        # Published HTML visualizations
         published_dir = instance_dir / "_published"
         if published_dir.is_dir():
             html_files = sorted(published_dir.glob("*.html"))
@@ -86,7 +117,7 @@ def _write_index_files(out_dir: Path) -> int:
                 lines.append("")
                 for html_file in html_files:
                     rel = html_file.relative_to(instance_dir)
-                    display = html_file.stem.replace("_", " ").replace("-", " ").title()
+                    display = _display_name(html_file.stem)
                     lines.append(f"- [{display}]({rel})")
 
         content = "\n".join(lines) + "\n"
