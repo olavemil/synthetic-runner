@@ -18,6 +18,8 @@ from library.tools.neural import (
     SLOW_VARIABLE_NAMES,
     GRAPH_FEATURE_NAMES,
     MAP_FEATURE_NAMES,
+    SHARED_PARAMETER_NAMES,
+    SHARED_BLEND_WEIGHTS,
     NetConfig,
     CheckpointMeta,
     encode_fast_signals,
@@ -26,6 +28,7 @@ from library.tools.neural import (
     encode_map_features,
     decode_fast_output,
     decode_slow_output,
+    blend_shared_parameters,
     make_fast_net_config,
     make_slow_net_config,
     record_checkpoint,
@@ -56,6 +59,16 @@ class TestSignalEncoding:
         assert len(result) == len(SLOW_SIGNAL_NAMES)
         assert result[0] == 0.9
         assert result[1] == -0.2
+
+    def test_encode_fast_signals_includes_reply_signals(self):
+        signals = {"reply_length": 0.6, "reply_entropy": 0.4}
+        result = encode_fast_signals(signals)
+        assert len(result) == len(FAST_SIGNAL_NAMES)
+        # reply_length and reply_entropy should be at their correct positions
+        rl_idx = FAST_SIGNAL_NAMES.index("reply_length")
+        re_idx = FAST_SIGNAL_NAMES.index("reply_entropy")
+        assert result[rl_idx] == 0.6
+        assert result[re_idx] == 0.4
 
     def test_encode_empty_signals(self):
         result = encode_fast_signals({})
@@ -477,4 +490,252 @@ class TestConfigWithRepFeatures:
 
     def test_slow_config_without_graph(self):
         config = make_slow_net_config(5, include_graph_features=False)
+        assert config.input_dim == len(SLOW_SIGNAL_NAMES)
+
+
+# ---------------------------------------------------------------------------
+# Shared behavioral parameters
+# ---------------------------------------------------------------------------
+
+
+class TestSharedParameters:
+    def test_shared_parameter_names_defined(self):
+        assert len(SHARED_PARAMETER_NAMES) == 6
+        assert all(name in SHARED_BLEND_WEIGHTS for name in SHARED_PARAMETER_NAMES)
+
+    def test_blend_weights_sum_to_one(self):
+        for name, (slow_w, fast_w) in SHARED_BLEND_WEIGHTS.items():
+            assert slow_w + fast_w == pytest.approx(1.0), f"{name} weights don't sum to 1.0"
+
+    def test_blend_shared_parameters(self):
+        fast = {"reply_willingness": 0.8, "processing_depth": 0.3}
+        slow = {"reply_willingness": 0.6, "processing_depth": 0.7}
+        result = blend_shared_parameters(fast, slow)
+        # reply_willingness: 0.4*0.6 + 0.6*0.8 = 0.24 + 0.48 = 0.72
+        assert result["reply_willingness"] == pytest.approx(0.72)
+        # processing_depth: 0.6*0.7 + 0.4*0.3 = 0.42 + 0.12 = 0.54
+        assert result["processing_depth"] == pytest.approx(0.54)
+
+    def test_blend_missing_uses_neutral(self):
+        fast = {"reply_willingness": 0.8}
+        slow = {}
+        result = blend_shared_parameters(fast, slow)
+        # reply_willingness: 0.4*0.5 + 0.6*0.8 = 0.2 + 0.48 = 0.68
+        assert result["reply_willingness"] == pytest.approx(0.68)
+        # All parameters should be present
+        assert len(result) == 6
+
+    def test_blend_both_empty(self):
+        result = blend_shared_parameters({}, {})
+        assert all(v == pytest.approx(0.5) for v in result.values())
+
+
+class TestDecodeWithSharedParams:
+    def test_decode_fast_with_shared(self):
+        segment_ids = ["s1", "s2"]
+        n_segments = 2
+        n_vars = len(FAST_VARIABLE_NAMES)
+        n_shared = len(SHARED_PARAMETER_NAMES)
+        # Provide enough values for segments + variables + shared
+        values = [1.0] * (n_segments + n_vars + n_shared)
+        result = decode_fast_output(values, segment_ids)
+        assert "shared" in result
+        assert len(result["shared"]) == n_shared
+        for name in SHARED_PARAMETER_NAMES:
+            assert name in result["shared"]
+            assert 0.0 <= result["shared"][name] <= 1.0
+
+    def test_decode_fast_without_shared(self):
+        """Short output (no shared params) should return empty shared dict."""
+        segment_ids = ["s1", "s2"]
+        n_segments = 2
+        n_vars = len(FAST_VARIABLE_NAMES)
+        values = [0.5] * (n_segments + n_vars)
+        result = decode_fast_output(values, segment_ids)
+        assert "shared" in result
+        assert result["shared"] == {}
+
+    def test_decode_slow_with_shared(self):
+        segment_ids = ["s1", "s2"]
+        n_segments = 2
+        n_vars = len(SLOW_VARIABLE_NAMES)
+        n_shared = len(SHARED_PARAMETER_NAMES)
+        values = [0.0] * (n_segments + n_vars + n_shared)
+        result = decode_slow_output(values, segment_ids)
+        assert "shared" in result
+        assert len(result["shared"]) == n_shared
+
+
+class TestConfigWithSharedParams:
+    def test_fast_config_with_shared(self):
+        config = make_fast_net_config(6, include_shared_params=True)
+        assert config.output_dim == 6 + len(FAST_VARIABLE_NAMES) + len(SHARED_PARAMETER_NAMES)
+
+    def test_fast_config_without_shared(self):
+        config = make_fast_net_config(6, include_shared_params=False)
+        assert config.output_dim == 6 + len(FAST_VARIABLE_NAMES)
+
+    def test_slow_config_with_shared(self):
+        config = make_slow_net_config(5, include_shared_params=True)
+        assert config.output_dim == 5 + len(SLOW_VARIABLE_NAMES) + len(SHARED_PARAMETER_NAMES)
+
+
+# ---------------------------------------------------------------------------
+# Soft normalization and reply length (no PyTorch)
+# ---------------------------------------------------------------------------
+
+
+class TestSoftNormalize:
+    def test_zero_returns_zero(self):
+        from library.tools.neural import _soft_normalize
+        assert _soft_normalize(0, 100) == 0.0
+
+    def test_negative_returns_zero(self):
+        from library.tools.neural import _soft_normalize
+        assert _soft_normalize(-5, 100) == 0.0
+
+    def test_midpoint_returns_half(self):
+        from library.tools.neural import _soft_normalize
+        assert _soft_normalize(100, 100) == pytest.approx(0.5, abs=0.01)
+
+    def test_high_value_saturates(self):
+        from library.tools.neural import _soft_normalize
+        assert _soft_normalize(300, 100) > 0.9
+
+    def test_low_value_below_half(self):
+        from library.tools.neural import _soft_normalize
+        assert _soft_normalize(30, 100) < 0.4
+
+
+class TestNormalizeReplyLength:
+    def test_empty_string(self):
+        from library.tools.neural import normalize_reply_length
+        assert normalize_reply_length("") == 0.0
+
+    def test_short_reply(self):
+        from library.tools.neural import normalize_reply_length
+        result = normalize_reply_length("Hello there.")
+        assert 0.0 < result < 0.3
+
+    def test_medium_reply(self):
+        from library.tools.neural import normalize_reply_length
+        text = "x" * 800
+        result = normalize_reply_length(text)
+        assert result == pytest.approx(0.5, abs=0.05)
+
+    def test_long_reply(self):
+        from library.tools.neural import normalize_reply_length
+        text = "x" * 3000
+        result = normalize_reply_length(text)
+        assert result > 0.9
+
+
+# ---------------------------------------------------------------------------
+# SessionMetrics and activity signal encoding (no PyTorch)
+# ---------------------------------------------------------------------------
+
+
+class TestSessionMetrics:
+    def test_defaults_are_zero(self):
+        from library.tools.neural import SessionMetrics
+        m = SessionMetrics()
+        assert m.think_iterations == 0
+        assert m.tool_calls == 0
+        assert m.topics_total == 0
+
+    def test_mutation(self):
+        from library.tools.neural import SessionMetrics
+        m = SessionMetrics()
+        m.think_iterations = 2
+        m.graph_nodes_added = 5
+        assert m.think_iterations == 2
+        assert m.graph_nodes_added == 5
+
+
+class TestActivitySignalEncoding:
+    def test_returns_correct_length(self):
+        from library.tools.neural import SessionMetrics, encode_activity_signals, SLOW_ACTIVITY_SIGNAL_NAMES
+        m = SessionMetrics()
+        result = encode_activity_signals(m)
+        assert len(result) == len(SLOW_ACTIVITY_SIGNAL_NAMES)
+
+    def test_all_zeros_for_empty_session(self):
+        from library.tools.neural import SessionMetrics, encode_activity_signals
+        m = SessionMetrics()
+        result = encode_activity_signals(m)
+        assert all(v == 0.0 for v in result)
+
+    def test_typical_session(self):
+        from library.tools.neural import SessionMetrics, encode_activity_signals
+        m = SessionMetrics(
+            think_iterations=2,
+            think_tokens=4000,
+            graph_nodes_added=3,
+            graph_nodes_total=20,
+            graph_edges_added=5,
+            graph_edges_total=40,
+            map_cells_changed=0.15,
+            topics_added=2,
+            topics_total=10,
+            topics_modified=1,
+            thoughts_archived_chars=500,
+            thinking_chars_pre_session=2000,
+            tool_calls=8,
+        )
+        result = encode_activity_signals(m)
+        # All values should be in 0-1 range
+        assert all(0.0 <= v <= 1.0 for v in result)
+        # think_iterations=2 with midpoint=2 → ~0.5
+        assert 0.4 < result[0] < 0.6
+        # think_tokens=4000 with midpoint=4000 → ~0.5
+        assert 0.4 < result[1] < 0.6
+
+    def test_high_activity_saturates(self):
+        from library.tools.neural import SessionMetrics, encode_activity_signals
+        m = SessionMetrics(
+            think_iterations=10,
+            think_tokens=20000,
+            graph_nodes_added=20,
+            graph_nodes_total=200,
+            tool_calls=50,
+        )
+        result = encode_activity_signals(m)
+        # High values should saturate near 1.0
+        assert result[0] > 0.9  # think_iterations
+        assert result[1] > 0.9  # think_tokens
+
+    def test_archive_ratio(self):
+        from library.tools.neural import SessionMetrics, encode_activity_signals
+        m = SessionMetrics(
+            thoughts_archived_chars=1000,
+            thinking_chars_pre_session=2000,
+        )
+        result = encode_activity_signals(m)
+        # thoughts_archived is at index 10
+        assert result[10] == pytest.approx(0.5)  # 1000/2000
+
+    def test_archive_ratio_zero_thinking(self):
+        from library.tools.neural import SessionMetrics, encode_activity_signals
+        m = SessionMetrics(
+            thoughts_archived_chars=100,
+            thinking_chars_pre_session=0,
+        )
+        result = encode_activity_signals(m)
+        assert result[10] == 0.0
+
+
+class TestSlowConfigWithActivity:
+    def test_slow_config_with_activity(self):
+        from library.tools.neural import SLOW_ACTIVITY_SIGNAL_NAMES
+        config = make_slow_net_config(5, include_activity_signals=True)
+        assert config.input_dim == len(SLOW_SIGNAL_NAMES) + len(SLOW_ACTIVITY_SIGNAL_NAMES)
+
+    def test_slow_config_with_both(self):
+        from library.tools.neural import SLOW_ACTIVITY_SIGNAL_NAMES
+        config = make_slow_net_config(5, include_graph_features=True, include_activity_signals=True)
+        expected = len(SLOW_SIGNAL_NAMES) + len(GRAPH_FEATURE_NAMES) + len(SLOW_ACTIVITY_SIGNAL_NAMES)
+        assert config.input_dim == expected
+
+    def test_slow_config_without_activity(self):
+        config = make_slow_net_config(5, include_activity_signals=False)
         assert config.input_dim == len(SLOW_SIGNAL_NAMES)

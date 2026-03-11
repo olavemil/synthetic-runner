@@ -159,8 +159,59 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
     logger.info("Hecate on_message completed subconscious updates (voices=%d)", len(cfg.voices))
 
 
+def _run_organize_phase(ctx: InstanceContext, cfg: "HecateConfig") -> None:
+    """Knowledge organization phase: tool-use session with organize + graph tools."""
+    from library.tools.patterns import thinking_session
+    from library.tools.organize import ORGANIZE_TOOL_SCHEMAS, _list_category_names, _list_topics_in_category
+    from library.tools.graph import GRAPH_TOOL_SCHEMAS
+
+    organize_tools = ORGANIZE_TOOL_SCHEMAS + GRAPH_TOOL_SCHEMAS
+
+    # Build context: combined voice thoughts + knowledge summary
+    categories = _list_category_names(ctx)
+    knowledge_lines = []
+    for cat in categories:
+        topics = _list_topics_in_category(ctx, cat)
+        knowledge_lines.append(
+            f"- {cat}: {len(topics)} topics"
+            + (f" ({', '.join(topics[:5])}{'...' if len(topics) > 5 else ''})" if topics else "")
+        )
+    knowledge_summary = "\n".join(knowledge_lines) if knowledge_lines else "No knowledge categories yet."
+
+    voice_thoughts = "\n\n".join(
+        f"### {voice.name}\n{ctx.read(f'{voice.name.lower()}_thinking.md') or '(no thoughts yet)'}"
+        for voice in cfg.voices
+    )
+
+    organize_context = (
+        f"## Current Voice Thoughts\n\n{voice_thoughts}\n\n"
+        f"## Knowledge Structure\n\n{knowledge_summary}"
+    )
+
+    organize_system = (
+        "You have access to the accumulated thoughts of your three voices and a knowledge organization system.\n\n"
+        "Review the recent thinking and decide what, if anything, should be:\n"
+        "- Extracted into a knowledge topic (new insight, updated understanding)\n"
+        "- Moved between categories (reclassification)\n"
+        "- Archived (no longer actively relevant but worth keeping)\n\n"
+        "You don't need to organize everything. Focus on what feels significant or what "
+        "has emerged across multiple voices. Your knowledge structure should reflect how "
+        "the collective actually thinks about things, not an imposed taxonomy."
+    )
+
+    logger.info("Hecate heartbeat: running organize phase")
+    thinking_session(
+        ctx,
+        system=organize_system,
+        initial_message=organize_context,
+        max_tokens=8192,
+        extra_tools=organize_tools,
+    )
+    logger.info("Hecate heartbeat: organize phase complete")
+
+
 def heartbeat(ctx: InstanceContext) -> None:
-    """Thinking iterations: each voice reflects, informed by others."""
+    """Thinking iterations: each voice reflects, informed by others. Then optional organize phase."""
     cfg = load_config(ctx)
     if len(cfg.voices) != 3:
         logger.warning("Hecate requires exactly 3 voices; got %d", len(cfg.voices))
@@ -195,6 +246,9 @@ def heartbeat(ctx: InstanceContext) -> None:
         for voice in cfg.voices:
             ctx.write(f"{voice.name.lower()}_thinking.md", new_thoughts[voice.name])
         previous_thoughts = new_thoughts
+
+    # Organize phase: runs after all thinking iterations
+    _run_organize_phase(ctx, cfg)
 
 
 class HecateSpecies(Species):

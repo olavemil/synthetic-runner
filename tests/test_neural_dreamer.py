@@ -95,15 +95,17 @@ class TestSegmentIntegration:
             "segment_weights.json": json.dumps(custom),
             "graph.json": "", "activation_map.json": "",
         })
-        weights, variables = _load_weights_and_variables(ctx)
+        weights, variables, shared = _load_weights_and_variables(ctx)
         assert weights["identity-curious"] == 0.8
+        assert shared.get("_nn_available") is False
 
     def test_load_weights_falls_back_to_defaults(self):
         from library.species.neural_dreamer import _load_weights_and_variables, _DEFAULT_WEIGHTS
 
         ctx = make_mock_ctx({"graph.json": "", "activation_map.json": ""})
-        weights, variables = _load_weights_and_variables(ctx)
+        weights, variables, shared = _load_weights_and_variables(ctx)
         assert weights == _DEFAULT_WEIGHTS
+        assert shared.get("_nn_available") is False
 
 
 class TestReviewSignalParsing:
@@ -332,6 +334,44 @@ class TestNeuralDreamerOnMessage:
         assert "success: 0.9" in reviews
         assert "---" in reviews
 
+    def test_on_message_reply_suppressed(self):
+        """When probabilistic returns False, reply should not be sent but review should still run."""
+        from library.species import neural_dreamer as nd_mod
+        from unittest.mock import patch
+
+        files = {
+            "thinking.md": "", "sleep.md": "", "reviews.md": "",
+            "last_review.md": "", "segment_weights.json": "",
+            "graph.json": "", "activation_map.json": "",
+        }
+        ctx = make_mock_ctx(files)
+
+        responses = iter([
+            LLMResponse(message="gut feeling\nreply_value: 0.3", tool_calls=[]),
+            LLMResponse(message="suggestions", tool_calls=[]),
+            LLMResponse(message="actual reply text", tool_calls=[]),
+            LLMResponse(message="success: 0.7\ncoherence: 0.6", tool_calls=[]),
+        ])
+        ctx.llm = MagicMock(side_effect=lambda **kwargs: next(responses))
+
+        events = [Event(event_id="e1", sender="@u:test", body="hi", timestamp=1, room="main")]
+
+        # Force _nn_available=True and probabilistic to return False
+        with patch.object(nd_mod, "_load_weights_and_variables") as mock_load, \
+             patch.object(nd_mod, "probabilistic", return_value=False):
+            from library.species.neural_dreamer import _DEFAULT_WEIGHTS
+            mock_load.return_value = (
+                dict(_DEFAULT_WEIGHTS),
+                dict(DEFAULT_VARIABLES),
+                {"_nn_available": True, "reply_willingness": 0.3},
+            )
+            nd_mod.on_message(ctx, events)
+
+        # Reply should NOT be sent
+        ctx.send.assert_not_called()
+        # But review should still be accumulated
+        assert "success: 0.7" in files.get("reviews.md", "")
+
 
 # ---------------------------------------------------------------------------
 # Graph/map summary
@@ -447,7 +487,7 @@ class TestNNIntegration:
         save_slow_net(ctx, slow_net)
 
         # Load weights — should come from nets, not defaults
-        weights, variables = _load_weights_and_variables(ctx)
+        weights, variables, shared = _load_weights_and_variables(ctx)
 
         # Should have entries for fast-controlled segments
         for sid in _FAST_SEGMENT_IDS:
@@ -457,6 +497,8 @@ class TestNNIntegration:
             assert sid in weights
         # Variables should be populated (not just defaults)
         assert len(variables) >= len(DEFAULT_VARIABLES)
+        # Shared params should indicate NN is available
+        assert shared.get("_nn_available") is True
 
 
 class TestIntrospection:
@@ -482,6 +524,350 @@ class TestIntrospection:
         assert "Two Kinds of Self" in result
         # Should contain config
         assert "neural-1" in result
+
+
+class TestBuildHeartbeatPhases:
+    def test_no_nn_returns_fixed_pipeline(self):
+        from library.species.neural_dreamer import _build_heartbeat_phases
+
+        phases = _build_heartbeat_phases({"_nn_available": False}, {})
+        assert phases == ["think", "subconscious", "dream", "sleep"]
+
+    def test_nn_available_always_has_think_subconscious_sleep(self):
+        from library.species.neural_dreamer import _build_heartbeat_phases
+        from unittest.mock import patch
+
+        # Force all probabilistic calls to return False
+        with patch("library.species.neural_dreamer.probabilistic", return_value=False):
+            phases = _build_heartbeat_phases({"_nn_available": True}, {})
+        assert phases[0] == "think"
+        assert "subconscious" in phases
+        assert phases[-1] == "sleep"
+        assert "organize" not in phases
+        assert "dream" not in phases
+
+    def test_nn_available_all_phases_enabled(self):
+        from library.species.neural_dreamer import _build_heartbeat_phases
+        from unittest.mock import patch
+
+        # Force all probabilistic calls to return True
+        with patch("library.species.neural_dreamer.probabilistic", return_value=True):
+            phases = _build_heartbeat_phases(
+                {"_nn_available": True, "processing_depth": 0.9,
+                 "organization_drive": 0.8, "creative_latitude": 0.8},
+                {"max_think_iterations": 3},
+            )
+        # Should have multiple thinks, organize, dream
+        assert phases.count("think") > 1
+        assert "organize" in phases
+        assert "dream" in phases
+        assert phases[-1] == "sleep"
+
+    def test_max_think_iterations_respected(self):
+        from library.species.neural_dreamer import _build_heartbeat_phases
+        from unittest.mock import patch
+
+        with patch("library.species.neural_dreamer.probabilistic", return_value=True):
+            phases = _build_heartbeat_phases(
+                {"_nn_available": True, "processing_depth": 1.0},
+                {"max_think_iterations": 2},
+            )
+        assert phases.count("think") == 2
+
+
+class TestHeartbeatOrganizePhase:
+    def test_heartbeat_with_organize(self):
+        """When NN enables organize phase, it should run organize tools session."""
+        from library.species import neural_dreamer as nd_mod
+        from unittest.mock import patch
+
+        files = {
+            "thinking.md": "# Thinking\n\nsome thoughts",
+            "sleep.md": "", "reviews.md": "",
+            "segment_weights.json": "", "graph.json": "", "activation_map.json": "",
+        }
+        ctx = make_mock_ctx(files)
+
+        responses = iter([
+            # think phase
+            LLMResponse(message="", tool_calls=[
+                ToolCall(id="t1", name="done", arguments={}),
+            ]),
+            # organize phase (thinking_session with organize tools)
+            LLMResponse(message="", tool_calls=[
+                ToolCall(id="t2", name="done", arguments={}),
+            ]),
+            # subconscious
+            LLMResponse(message="concerns", tool_calls=[]),
+            # sleep
+            LLMResponse(message="consolidated", tool_calls=[]),
+        ])
+        ctx.llm = MagicMock(side_effect=lambda **kwargs: next(responses))
+        ctx.exists = MagicMock(return_value=False)
+        ctx.list = MagicMock(return_value=[])
+
+        # Force phases: think, organize, subconscious, sleep (no dream)
+        with patch.object(nd_mod, "_build_heartbeat_phases",
+                          return_value=["think", "organize", "subconscious", "sleep"]):
+            nd_mod.heartbeat(ctx)
+
+        assert "consolidated" in files.get("sleep.md", "")
+        assert "concerns" in files.get("concerns.md", "")
+
+
+class TestPostReplyExtraThinking:
+    def test_extra_thinking_runs_when_nn_enabled(self):
+        """Post-reply extra thinking should run when probabilistic returns True."""
+        from library.species import neural_dreamer as nd_mod
+        from unittest.mock import patch, call
+
+        files = {
+            "thinking.md": "existing", "sleep.md": "", "reviews.md": "",
+            "last_review.md": "", "segment_weights.json": "",
+            "graph.json": "", "activation_map.json": "",
+        }
+        ctx = make_mock_ctx(files)
+
+        responses = iter([
+            # on_message pipeline: gut, suggest, reply, review
+            LLMResponse(message="gut", tool_calls=[]),
+            LLMResponse(message="suggest", tool_calls=[]),
+            LLMResponse(message="reply text", tool_calls=[]),
+            LLMResponse(message="success: 0.8", tool_calls=[]),
+            # extra thinking session
+            LLMResponse(message="", tool_calls=[
+                ToolCall(id="t1", name="done", arguments={}),
+            ]),
+        ])
+        ctx.llm = MagicMock(side_effect=lambda **kwargs: next(responses))
+
+        events = [Event(event_id="e1", sender="@u:test", body="hi", timestamp=1, room="main")]
+
+        # Force NN available + probabilistic always True (reply + extra think)
+        with patch.object(nd_mod, "_load_weights_and_variables") as mock_load, \
+             patch.object(nd_mod, "probabilistic", return_value=True):
+            from library.species.neural_dreamer import _DEFAULT_WEIGHTS
+            mock_load.return_value = (
+                dict(_DEFAULT_WEIGHTS),
+                dict(DEFAULT_VARIABLES),
+                {"_nn_available": True, "reply_willingness": 0.9, "processing_depth": 0.8},
+            )
+            nd_mod.on_message(ctx, events)
+
+        # Should have made 5 LLM calls (4 pipeline + 1 extra think)
+        assert ctx.llm.call_count == 5
+
+    def test_no_extra_thinking_without_nn(self):
+        """Post-reply extra thinking should NOT run when NN is not available."""
+        from library.species import neural_dreamer as nd_mod
+
+        files = {
+            "thinking.md": "", "sleep.md": "", "reviews.md": "",
+            "last_review.md": "", "segment_weights.json": "",
+            "graph.json": "", "activation_map.json": "",
+        }
+        ctx = make_mock_ctx(files)
+
+        responses = iter([
+            LLMResponse(message="gut", tool_calls=[]),
+            LLMResponse(message="suggest", tool_calls=[]),
+            LLMResponse(message="reply", tool_calls=[]),
+            LLMResponse(message="success: 0.5", tool_calls=[]),
+        ])
+        ctx.llm = MagicMock(side_effect=lambda **kwargs: next(responses))
+
+        events = [Event(event_id="e1", sender="@u:test", body="hi", timestamp=1, room="main")]
+        nd_mod.on_message(ctx, events)
+
+        # Should have made exactly 4 LLM calls (no extra think)
+        assert ctx.llm.call_count == 4
+
+
+class TestSessionMetrics:
+    def test_snapshot_counts_empty(self):
+        from library.species.neural_dreamer import _snapshot_counts
+
+        ctx = make_mock_ctx({"graph.json": "", "activation_map.json": "", "thinking.md": ""})
+        ctx.exists = MagicMock(return_value=False)
+        ctx.list = MagicMock(return_value=[])
+        snap = _snapshot_counts(ctx)
+        assert snap["graph_nodes"] == 0
+        assert snap["graph_edges"] == 0
+        assert snap["topics"] == 0
+        assert snap["thinking_chars"] == 0
+
+    def test_snapshot_counts_with_data(self):
+        from library.species.neural_dreamer import _snapshot_counts
+        from library.tools.graph import SemanticGraph
+
+        g = SemanticGraph()
+        g.add_node("a", "A")
+        g.add_node("b", "B")
+        g.add_edge("a", "b", "rel", 1.0)
+
+        files = {
+            "graph.json": g.to_json(),
+            "activation_map.json": "",
+            "thinking.md": "some thinking text here",
+            "knowledge/concepts/_meta.md": "# concepts\n",
+            "knowledge/concepts/trust.md": "Trust stuff.",
+        }
+        ctx = make_mock_ctx(files)
+        ctx.exists = MagicMock(side_effect=lambda p: p in files and bool(files[p]))
+        ctx.list = MagicMock(side_effect=lambda prefix="": [
+            k for k in sorted(files.keys())
+            if k.startswith(prefix) and bool(files[k])
+        ])
+
+        snap = _snapshot_counts(ctx)
+        assert snap["graph_nodes"] == 2
+        assert snap["graph_edges"] == 1
+        assert snap["topics"] == 1
+        assert snap["thinking_chars"] == len("some thinking text here")
+
+    def test_build_session_metrics_deltas(self):
+        from library.species.neural_dreamer import _build_session_metrics
+
+        files = {
+            "graph.json": "",
+            "activation_map.json": "",
+            "thinking.md": "shorter",
+        }
+        ctx = make_mock_ctx(files)
+        ctx.exists = MagicMock(return_value=False)
+        ctx.list = MagicMock(return_value=[])
+
+        pre = {
+            "graph_nodes": 5, "graph_edges": 10,
+            "topics": 3, "thinking_chars": 500,
+        }
+        metrics = _build_session_metrics(ctx, pre, think_count=2)
+
+        assert metrics.think_iterations == 2
+        assert metrics.graph_nodes_added == 0  # 0 - 5 is clamped to 0
+        assert metrics.topics_added == 0
+        # thinking shrunk: 500 -> len("shorter") = 7
+        assert metrics.thoughts_archived_chars == 500 - len("shorter")
+
+    def test_heartbeat_logs_metrics(self):
+        """Heartbeat should compute and log session metrics."""
+        from library.species import neural_dreamer as nd_mod
+        import logging
+
+        files = {
+            "thinking.md": "# Thinking\n", "sleep.md": "", "reviews.md": "",
+            "segment_weights.json": "", "graph.json": "", "activation_map.json": "",
+        }
+        ctx = make_mock_ctx(files)
+        ctx.exists = MagicMock(return_value=False)
+        ctx.list = MagicMock(return_value=[])
+
+        responses = iter([
+            LLMResponse(message="", tool_calls=[
+                ToolCall(id="t1", name="done", arguments={}),
+            ]),
+            LLMResponse(message="concerns", tool_calls=[]),
+            LLMResponse(message="dream", tool_calls=[]),
+            LLMResponse(message="sleep output", tool_calls=[]),
+        ])
+        ctx.llm = MagicMock(side_effect=lambda **kwargs: next(responses))
+
+        # Just verify it doesn't crash — metrics are computed and logged
+        nd_mod.heartbeat(ctx)
+        # At least 4 LLM calls made (think + subconscious + dream + sleep)
+        assert ctx.llm.call_count == 4
+
+
+class TestRateLimitedPipeline:
+    def test_rate_limited_runs_gut_and_review_only(self):
+        """When rate-limited, on_message should run gut + review (2 LLM calls)."""
+        from library.species import neural_dreamer as nd_mod
+
+        files = {
+            "thinking.md": "some thoughts", "sleep.md": "", "reviews.md": "",
+            "last_review.md": "", "segment_weights.json": "",
+            "graph.json": "", "activation_map.json": "",
+        }
+        ctx = make_mock_ctx(files)
+        ctx._reply_rate_limited = True  # Set the rate limit flag
+
+        responses = iter([
+            LLMResponse(message="gut feeling about this message", tool_calls=[]),
+            LLMResponse(message="success: 0.7\ncoherence: 0.6", tool_calls=[]),
+        ])
+        ctx.llm = MagicMock(side_effect=lambda **kwargs: next(responses))
+
+        events = [Event(event_id="e1", sender="@u:test", body="hi", timestamp=1, room="main")]
+        nd_mod.on_message(ctx, events)
+
+        # Should have made exactly 2 LLM calls (gut + review)
+        assert ctx.llm.call_count == 2
+        # No reply should be sent
+        ctx.send.assert_not_called()
+        # Review should still be accumulated
+        assert "success: 0.7" in files.get("reviews.md", "")
+
+    def test_rate_limited_flag_must_be_true(self):
+        """MagicMock attributes should not trigger rate-limited path."""
+        from library.species import neural_dreamer as nd_mod
+
+        files = {
+            "thinking.md": "", "sleep.md": "", "reviews.md": "",
+            "last_review.md": "", "segment_weights.json": "",
+            "graph.json": "", "activation_map.json": "",
+        }
+        ctx = make_mock_ctx(files)
+        # MagicMock has all attributes — should NOT trigger rate limit
+
+        responses = iter([
+            LLMResponse(message="gut", tool_calls=[]),
+            LLMResponse(message="suggest", tool_calls=[]),
+            LLMResponse(message="reply", tool_calls=[]),
+            LLMResponse(message="success: 0.5", tool_calls=[]),
+        ])
+        ctx.llm = MagicMock(side_effect=lambda **kwargs: next(responses))
+
+        events = [Event(event_id="e1", sender="@u:test", body="hi", timestamp=1, room="main")]
+        nd_mod.on_message(ctx, events)
+
+        # Should have made 4 LLM calls (full pipeline, not abbreviated)
+        assert ctx.llm.call_count == 4
+
+
+class TestOrganizeToolDispatch:
+    def test_handle_tool_dispatches_organize(self):
+        """handle_tool should dispatch organize_ prefixed tools."""
+        from library.tools.tools import handle_tool
+
+        files = {}
+        ctx = make_mock_ctx(files)
+        ctx.exists = MagicMock(return_value=False)
+        ctx.list = MagicMock(return_value=[])
+
+        result, is_done = handle_tool(ctx, "organize_list_categories", {})
+        assert not is_done
+        # Should have seeded defaults
+        assert "concepts" in result
+
+    def test_handle_tool_organize_write_topic(self):
+        """handle_tool should dispatch organize_write_topic."""
+        from library.tools.tools import handle_tool
+
+        files = {}
+        ctx = make_mock_ctx(files)
+        ctx.exists = MagicMock(side_effect=lambda p: p in files and bool(files[p]))
+        ctx.list = MagicMock(side_effect=lambda prefix="": [
+            k for k in sorted(files.keys())
+            if k.startswith(prefix) and bool(files[k])
+        ])
+
+        result, is_done = handle_tool(ctx, "organize_write_topic", {
+            "category": "concepts",
+            "topic": "trust",
+            "content": "Trust is earned.",
+        })
+        assert not is_done
+        assert "Created" in result
 
 
 class TestGraphMapSummary:

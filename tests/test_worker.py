@@ -440,3 +440,137 @@ class TestProviderSlots:
         slots_items = worker._slots_store.scan_items("default:slot:")
         running_slots = [k for k, v, owner in slots_items if owner is not None]
         assert len(running_slots) == 0
+
+    def test_cleanup_stale_provider_slots(self):
+        """Stale slots from crashed workers should be released on startup."""
+        db = open_store()
+        slots_store = NamespacedStore(db, "provider:slots")
+        
+        # Simulate stale slots from crashed workers
+        slots_store.claim("lmstudio:slot:0", "old-worker-1")
+        slots_store.claim("lmstudio:slot:1", "old-worker-2")
+        
+        # Verify slots are owned
+        items = slots_store.scan_items()
+        owned_before = [(k, o) for k, _, o in items if o is not None]
+        assert len(owned_before) == 2
+        
+        # Create fresh worker (which should cleanup stale slots)
+        instances = [_make_instance("a", provider="lmstudio")]
+        harness_config = HarnessConfig(
+            providers=[
+                ProviderConfig(
+                    id="lmstudio",
+                    type="openai_compat",
+                    max_concurrency=2,
+                )
+            ],
+            adapters=[],
+        )
+        registry = Registry()
+        registry.register_species(_make_species())
+        for inst in instances:
+            registry.register_instance(inst)
+        
+        worker = Worker(
+            harness_config=harness_config,
+            registry=registry,
+            providers={"lmstudio": MagicMock()},
+            adapters={},
+            store_db=db,
+            base_dir="/tmp",
+        )
+        
+        # Run cleanup
+        cleaned = worker._cleanup_stale_provider_slots()
+        assert cleaned == 2
+        
+        # Verify slots are released
+        items_after = slots_store.scan_items()
+        owned_after = [(k, o) for k, _, o in items_after if o is not None]
+        assert len(owned_after) == 0
+
+
+class TestReplyRateLimitWiring:
+    """Tests for rate limit integration in worker job execution."""
+
+    def test_rate_limited_sets_flag_on_context(self):
+        """When rate-limited, ctx._reply_rate_limited should be True."""
+        from library.harness.config import MessagingConfig, SpaceMapping
+        db = open_store()
+        instance = InstanceConfig(
+            instance_id="rl-1",
+            species="test",
+            provider="default",
+            model="m",
+            schedule={"reply_cooldown_seconds": 300},
+        )
+        worker = _build_worker(db, [instance])
+
+        # Set up: recent reply was sent (within cooldown)
+        checker_store = NamespacedStore(db, "checker")
+        import time
+        checker_store.put("last_reply_time:rl-1", time.time())
+
+        ctx = MagicMock()
+        job = MagicMock()
+        job.instance_id = "rl-1"
+        payload = {"events": [{"event_id": "e1", "sender": "@u:test", "body": "hi", "timestamp": 1, "room": "main"}]}
+
+        worker._configure_send_policy(ctx, job, "on_message", payload)
+
+        # ctx should have rate limit flag set
+        assert ctx._reply_rate_limited is True
+        # send policy should block sends
+        ctx.configure_send_policy.assert_called_once()
+        call_kwargs = ctx.configure_send_policy.call_args[1]
+        assert call_kwargs["allow_send"] is False
+        assert call_kwargs["max_sends"] == 0
+
+    def test_no_rate_limit_no_flag(self):
+        """When not rate-limited, ctx should not get _reply_rate_limited."""
+        db = open_store()
+        instance = InstanceConfig(
+            instance_id="rl-2",
+            species="test",
+            provider="default",
+            model="m",
+            schedule={"reply_cooldown_seconds": 1},
+        )
+        worker = _build_worker(db, [instance])
+
+        # No recent reply — should not be rate-limited
+        ctx = MagicMock()
+        # Ensure _reply_rate_limited doesn't exist by default on this mock
+        del ctx._reply_rate_limited
+        job = MagicMock()
+        job.instance_id = "rl-2"
+        payload = {"events": [{"event_id": "e1", "sender": "@u:test", "body": "hi", "timestamp": 1, "room": "main"}]}
+
+        worker._configure_send_policy(ctx, job, "on_message", payload)
+
+        # send policy should allow sends
+        call_kwargs = ctx.configure_send_policy.call_args[1]
+        assert call_kwargs["allow_send"] is True
+        assert call_kwargs["max_sends"] == 1
+
+    def test_reply_sent_recorded_in_finally(self):
+        """After a reply is sent, record_reply_sent should be called."""
+        db = open_store()
+        instance = _make_instance("rec-1")
+        worker = _build_worker(db, [instance])
+        queue = JobQueue(db)
+
+        job_id = queue.enqueue("rec-1", "on_message")
+
+        # Mock context that reports 1 sent message
+        mock_ctx = MagicMock()
+        mock_ctx.sent_message_count = 1
+
+        with patch.object(worker, "_build_context", return_value=mock_ctx):
+            worker.run()
+
+        # Check that reply time was recorded
+        checker_store = NamespacedStore(db, "checker")
+        last_reply = checker_store.get("last_reply_time:rec-1")
+        assert last_reply is not None

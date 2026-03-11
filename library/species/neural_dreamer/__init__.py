@@ -1,12 +1,17 @@
 """Neural Dreamer species — NN-driven extension of Subconscious Dreamer.
 
 Two cycles:
-  Slow (heartbeat): think → sleep (updates slow net)
-  Fast (on_message): gut → suggest → reply → review (updates fast net)
+  Slow (heartbeat): think → [organize] → subconscious → [dream] → sleep
+    - Think can iterate (controlled by processing_depth)
+    - Organize is probabilistic (controlled by organization_drive)
+    - Dream is probabilistic (controlled by creative_latitude)
+  Fast (on_message): gut → suggest → [reply] → review → [extra think]
+    - Reply is probabilistic (controlled by reply_willingness × reply_value)
+    - Extra think is probabilistic (controlled by processing_depth)
 
-When neural nets are available, they produce segment selection weights and
-variable values. Falls back to manual defaults when PyTorch is not installed
-or nets haven't been initialised yet.
+When neural nets are available, they produce segment selection weights,
+variable values, and shared behavioral parameters. Falls back to manual
+defaults when PyTorch is not installed or nets haven't been initialised yet.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from library.species import Species, SpeciesManifest, EntryPoint
+from library.tools.decisions import probabilistic
 from library.tools.pipeline import run_pipeline, load_pipeline
 from library.tools.prompts import format_events, get_entity_id
 from library.tools.segments import (
@@ -71,8 +77,12 @@ _SLOW_SEGMENT_IDS = [
 ]
 
 
-def _try_nn_weights_and_variables(ctx: InstanceContext) -> tuple[dict[str, float], dict[str, float]] | None:
+def _try_nn_weights_and_variables(
+    ctx: InstanceContext,
+) -> tuple[dict[str, float], dict[str, float], dict[str, float]] | None:
     """Try to get weights and variables from neural nets. Returns None if unavailable.
+
+    Returns (weights, variables, shared_params) or None.
 
     When graph/map data is available, their summary features are appended to
     the signal vectors — but only if the loaded net's input_dim matches.
@@ -84,8 +94,10 @@ def _try_nn_weights_and_variables(ctx: InstanceContext) -> tuple[dict[str, float
             encode_fast_signals, encode_slow_signals,
             encode_graph_features, encode_map_features,
             decode_fast_output, decode_slow_output,
+            blend_shared_parameters,
             FAST_SIGNAL_NAMES, MAP_FEATURE_NAMES,
             SLOW_SIGNAL_NAMES, GRAPH_FEATURE_NAMES,
+            SLOW_ACTIVITY_SIGNAL_NAMES,
         )
     except ImportError:
         return None
@@ -102,6 +114,8 @@ def _try_nn_weights_and_variables(ctx: InstanceContext) -> tuple[dict[str, float
 
     weights: dict[str, float] = {}
     variables: dict[str, float] = {}
+    fast_shared: dict[str, float] = {}
+    slow_shared: dict[str, float] = {}
 
     if fast_net is not None:
         last_review = ctx.read("last_review.md") or ""
@@ -121,6 +135,7 @@ def _try_nn_weights_and_variables(ctx: InstanceContext) -> tuple[dict[str, float
         decoded = decode_fast_output(raw, _FAST_SEGMENT_IDS)
         weights.update(decoded["weights"])
         variables.update(decoded["variables"])
+        fast_shared = decoded.get("shared", {})
 
         top_weights = sorted(decoded["weights"].items(), key=lambda x: x[1], reverse=True)[:3]
         top_str = ", ".join(f"{k}={v:.2f}" for k, v in top_weights)
@@ -137,44 +152,62 @@ def _try_nn_weights_and_variables(ctx: InstanceContext) -> tuple[dict[str, float
         signals = _parse_sleep_signals(sleep)
         input_vals = encode_slow_signals(signals)
 
-        # Append graph features if the net expects them
+        # Append graph and/or activity features if the net expects them
         has_graph = False
-        expected_with_graph = len(SLOW_SIGNAL_NAMES) + len(GRAPH_FEATURE_NAMES)
-        if slow_net.config.input_dim == expected_with_graph:
+        has_activity = False
+        base_plus_graph = len(SLOW_SIGNAL_NAMES) + len(GRAPH_FEATURE_NAMES)
+        base_plus_graph_plus_activity = base_plus_graph + len(SLOW_ACTIVITY_SIGNAL_NAMES)
+        if slow_net.config.input_dim in (base_plus_graph, base_plus_graph_plus_activity):
             from library.tools.graph import load_graph
             graph = load_graph(ctx)
             input_vals += encode_graph_features(graph)
             has_graph = True
+        if slow_net.config.input_dim == base_plus_graph_plus_activity:
+            # Pad with zeros — no session metrics during forward inference
+            input_vals += [0.0] * len(SLOW_ACTIVITY_SIGNAL_NAMES)
+            has_activity = True
 
         raw = slow_net.forward(input_vals)
         decoded = decode_slow_output(raw, _SLOW_SEGMENT_IDS)
         weights.update(decoded["weights"])
         variables.update(decoded["variables"])
+        slow_shared = decoded.get("shared", {})
 
         top_weights = sorted(decoded["weights"].items(), key=lambda x: x[1], reverse=True)[:3]
         top_str = ", ".join(f"{k}={v:.2f}" for k, v in top_weights)
         var_str = ", ".join(f"{k}={v:.2f}" for k, v in decoded["variables"].items())
         logger.info(
-            "Slow net forward (updates=%d, signals=%d, graph=%s): top_weights=[%s] vars=[%s]",
-            slow_meta.update_count, len(signals), has_graph, top_str, var_str,
+            "Slow net forward (updates=%d, signals=%d, graph=%s, activity=%s): "
+            "top_weights=[%s] vars=[%s]",
+            slow_meta.update_count, len(signals), has_graph, has_activity,
+            top_str, var_str,
         )
     else:
         logger.info("Slow net not available, using default identity/temporal/task weights")
 
-    return weights, variables
+    shared_params = blend_shared_parameters(fast_shared, slow_shared)
+    shared_params["_nn_available"] = True
+    return weights, variables, shared_params
 
 
-def _load_weights_and_variables(ctx: InstanceContext) -> tuple[dict[str, float], dict[str, float]]:
-    """Load weights and variables, preferring NN output, falling back to defaults."""
+def _load_weights_and_variables(
+    ctx: InstanceContext,
+) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
+    """Load weights, variables, and shared params. Prefers NN output, falls back to defaults.
+
+    Returns (weights, variables, shared_params). When NN is not available,
+    shared_params will have ``_nn_available`` set to False.
+    """
+    default_shared: dict[str, float] = {"_nn_available": False}
     nn_result = _try_nn_weights_and_variables(ctx)
     if nn_result is not None:
-        weights, variables = nn_result
+        weights, variables, shared_params = nn_result
         merged_weights = dict(_DEFAULT_WEIGHTS)
         merged_weights.update(weights)
         merged_variables = dict(DEFAULT_VARIABLES)
         merged_variables.update(variables)
         logger.info("Weights source: neural nets (%d weights, %d variables)", len(merged_weights), len(merged_variables))
-        return merged_weights, merged_variables
+        return merged_weights, merged_variables, shared_params
 
     # Fall back to manual weights from storage or defaults
     raw = ctx.read("segment_weights.json")
@@ -182,11 +215,11 @@ def _load_weights_and_variables(ctx: InstanceContext) -> tuple[dict[str, float],
         try:
             weights = json.loads(raw)
             logger.info("Weights source: segment_weights.json (%d weights)", len(weights))
-            return weights, dict(DEFAULT_VARIABLES)
+            return weights, dict(DEFAULT_VARIABLES), dict(default_shared)
         except (json.JSONDecodeError, TypeError):
             pass
     logger.info("Weights source: hardcoded defaults")
-    return dict(_DEFAULT_WEIGHTS), dict(DEFAULT_VARIABLES)
+    return dict(_DEFAULT_WEIGHTS), dict(DEFAULT_VARIABLES), dict(default_shared)
 
 
 def _parse_review_signals(review_text: str) -> dict[str, float]:
@@ -278,17 +311,20 @@ def _update_fast_net(ctx: InstanceContext, review_text: str) -> None:
                 meta.update_count, loss, " (new net)" if created_new else "")
 
 
-def _update_slow_net(ctx: InstanceContext, sleep_text: str, session_label: str) -> None:
+def _update_slow_net(
+    ctx: InstanceContext, sleep_text: str, session_label: str,
+    metrics: Any = None,
+) -> None:
     """Parse sleep signals and update slow net.
 
-    New nets are created with graph features enabled. Existing nets keep
-    their original input_dim — graph features are appended only when dims match.
+    New nets are created with graph + activity features enabled. Existing nets
+    keep their original input_dim — extra features are appended only when dims match.
     """
     try:
         from library.tools.neural import (
             load_slow_net, save_slow_net, make_slow_net_config,
-            encode_slow_signals, encode_graph_features,
-            SLOW_SIGNAL_NAMES, GRAPH_FEATURE_NAMES,
+            encode_slow_signals, encode_graph_features, encode_activity_signals,
+            SLOW_SIGNAL_NAMES, GRAPH_FEATURE_NAMES, SLOW_ACTIVITY_SIGNAL_NAMES,
             CheckpointMeta, record_checkpoint,
         )
     except ImportError:
@@ -302,7 +338,11 @@ def _update_slow_net(ctx: InstanceContext, sleep_text: str, session_label: str) 
     sig_str = ", ".join(f"{k}={v:.2f}" for k, v in signals.items())
     logger.info("Slow net update: parsed signals [%s] (session=%s)", sig_str, session_label)
 
-    config = make_slow_net_config(len(_SLOW_SEGMENT_IDS), include_graph_features=True)
+    config = make_slow_net_config(
+        len(_SLOW_SEGMENT_IDS),
+        include_graph_features=True,
+        include_activity_signals=metrics is not None,
+    )
     try:
         slow_net, meta = load_slow_net(ctx, fallback_config=config)
     except ImportError:
@@ -320,10 +360,15 @@ def _update_slow_net(ctx: InstanceContext, sleep_text: str, session_label: str) 
     input_vals = encode_slow_signals(signals)
 
     # Append graph features if the net expects them
-    expected_with_graph = len(SLOW_SIGNAL_NAMES) + len(GRAPH_FEATURE_NAMES)
-    if slow_net.config.input_dim == expected_with_graph:
+    base_plus_graph = len(SLOW_SIGNAL_NAMES) + len(GRAPH_FEATURE_NAMES)
+    base_plus_graph_plus_activity = base_plus_graph + len(SLOW_ACTIVITY_SIGNAL_NAMES)
+    if slow_net.config.input_dim in (base_plus_graph, base_plus_graph_plus_activity):
         from library.tools.graph import load_graph
         input_vals += encode_graph_features(load_graph(ctx))
+
+    # Append activity signals if the net expects them
+    if slow_net.config.input_dim == base_plus_graph_plus_activity and metrics is not None:
+        input_vals += encode_activity_signals(metrics)
 
     current_output = slow_net.forward(input_vals)
     target = _nudge_output(current_output, signals, _SLOW_SEGMENT_IDS)
@@ -445,57 +490,95 @@ def _graph_map_summary(ctx: InstanceContext) -> str:
     return "\n".join(parts) if parts else ""
 
 
-# --- Entry points ---
+# --- Metrics helpers ---
 
-def heartbeat(ctx: InstanceContext) -> None:
-    """Slow cycle: think → subconscious → dream → sleep → update slow net."""
-    logger.info("Heartbeat starting (instance=%s)", ctx.instance_id)
+def _snapshot_counts(ctx: InstanceContext) -> dict[str, int]:
+    """Snapshot current graph/organize/thinking counts for delta computation."""
+    from library.tools.graph import load_graph
+    from library.tools.organize import count_all_topics
+
+    graph = load_graph(ctx)
+    desc = graph.describe()
     thinking = ctx.read("thinking.md") or ""
-    dreams = ctx.read("dreams.md") or ""
-    concerns = ctx.read("concerns.md") or ""
-    sleep_output = ctx.read("sleep.md") or ""
-    reviews = ctx.read("reviews.md") or ""
-    rep_summary = _graph_map_summary(ctx)
-    logger.info("Heartbeat context: thinking=%d chars, dreams=%d chars, concerns=%d chars, "
-                "sleep=%d chars, reviews=%d chars, rep=%d chars",
-                len(thinking), len(dreams), len(concerns),
-                len(sleep_output), len(reviews), len(rep_summary))
 
-    weights, variables = _load_weights_and_variables(ctx)
+    return {
+        "graph_nodes": desc["node_count"],
+        "graph_edges": desc["edge_count"],
+        "topics": count_all_topics(ctx),
+        "thinking_chars": len(thinking),
+    }
 
-    # Build thinking system prompt with segment injection
-    think_template = (_SPECIES_DIR / "prompts" / "think.md").read_text()
-    think_system = _inject_segments(
-        think_template, _REGISTRY, weights, variables,
-        ["identity", "state", "meta"],
+
+def _build_session_metrics(
+    ctx: InstanceContext,
+    pre: dict[str, int],
+    think_count: int,
+) -> "SessionMetrics":
+    """Build SessionMetrics by comparing pre-session snapshot to current state."""
+    from library.tools.neural import SessionMetrics
+
+    post = _snapshot_counts(ctx)
+    return SessionMetrics(
+        think_iterations=think_count,
+        think_tokens=0,  # not tracked mechanically (would need LLM response accumulation)
+        graph_nodes_added=max(0, post["graph_nodes"] - pre["graph_nodes"]),
+        graph_edges_added=max(0, post["graph_edges"] - pre["graph_edges"]),
+        map_cells_changed=0,  # would need map diff; left as 0 for now
+        topics_added=max(0, post["topics"] - pre["topics"]),
+        topics_modified=0,  # would need per-topic diff tracking
+        thoughts_archived_chars=max(0, pre["thinking_chars"] - post["thinking_chars"]),
+        thinking_chars_pre_session=pre["thinking_chars"],
+        tool_calls=0,  # not tracked mechanically
+        graph_nodes_total=post["graph_nodes"],
+        graph_edges_total=post["graph_edges"],
+        topics_total=post["topics"],
     )
 
-    # Build subconscious system prompt with segment injection
-    subconscious_template = (_SPECIES_DIR / "prompts" / "subconscious.md").read_text()
-    subconscious_system = _inject_segments(
-        subconscious_template, _REGISTRY, weights, variables,
-        ["state"],
-    )
 
-    # Build dreaming system prompt with segment injection
-    dreaming_template = (_SPECIES_DIR / "prompts" / "dreaming.md").read_text()
-    dreaming_system = _inject_segments(
-        dreaming_template, _REGISTRY, weights, variables,
-        ["identity"],
-    )
+# --- Phase helpers ---
 
-    thinking_context = _build_context(
-        ("Your Concerns", concerns),
-        ("Your Dreams", dreams),
-        ("Your Sleep Consolidation", sleep_output),
-        ("Recent Reviews", reviews),
-        ("Representation State", rep_summary),
-        ("Your Current Thoughts", thinking),
-    ) or "This is your first thinking session."
+def _build_heartbeat_phases(shared_params: dict[str, float], config: dict) -> list[str]:
+    """Determine which heartbeat phases to run and in what order.
 
-    # Assemble extra tools for thinking session (graph + map)
+    Uses shared behavioral parameters for probabilistic phase decisions.
+    When NN is not available, runs the fixed pipeline (think → subconscious → dream → sleep).
+    """
+    nn_available = shared_params.get("_nn_available", False)
+    if not nn_available:
+        return ["think", "subconscious", "dream", "sleep"]
+
+    max_thinks = int(config.get("max_think_iterations", 3))
+    phases = ["think"]
+
+    # Additional think iterations with diminishing probability
+    processing_depth = shared_params.get("processing_depth", 0.5)
+    for i in range(1, max_thinks):
+        if probabilistic(processing_depth - 0.3 * i, label=f"extra_think_{i}"):
+            phases.append("think")
+        else:
+            break
+
+    # Optional organize phase
+    organization_drive = shared_params.get("organization_drive", 0.5)
+    if probabilistic(organization_drive, label="organize_phase"):
+        phases.append("organize")
+
+    phases.append("subconscious")
+
+    # Optional dream phase
+    creative_latitude = shared_params.get("creative_latitude", 0.5)
+    if probabilistic(creative_latitude, label="dream_phase"):
+        phases.append("dream")
+
+    phases.append("sleep")
+    return phases
+
+
+def _get_thinking_tools() -> list[dict]:
+    """Assemble tool schemas for thinking session (graph + map + organize + publish)."""
     from library.tools.graph import GRAPH_TOOL_SCHEMAS
     from library.tools.activation_map import MAP_TOOL_SCHEMAS
+    from library.tools.organize import ORGANIZE_TOOL_SCHEMAS
     publish_schema = {
         "type": "function",
         "function": {
@@ -514,40 +597,224 @@ def heartbeat(ctx: InstanceContext) -> None:
             },
         },
     }
-    thinking_tools = GRAPH_TOOL_SCHEMAS + MAP_TOOL_SCHEMAS + [publish_schema]
+    return GRAPH_TOOL_SCHEMAS + MAP_TOOL_SCHEMAS + ORGANIZE_TOOL_SCHEMAS + [publish_schema]
 
-    initial_state = {
-        "think_system": think_system,
-        "thinking_context": thinking_context,
-        "thinking_tools": thinking_tools,
-        "subconscious_system": subconscious_system,
-        "subconscious_sections": [
-            ["thinking.md", "Your Thoughts"],
-            ["dreams.md", "Your Dreams"],
-        ],
-        "dreaming_system": dreaming_system,
-        "dreaming_sections": [
-            ["thinking.md", "Your Thoughts"],
-            ["concerns.md", "Your Concerns"],
-        ],
-        "sleep_sections": [
-            ["thinking.md", "Your Thoughts"],
-            ["concerns.md", "Your Concerns"],
-            ["dreams.md", "Your Dreams"],
-            ["reviews.md", "Session Reviews"],
-            ["sleep.md", "Previous Sleep Output"],
-        ],
-        "_species_dir": str(_SPECIES_DIR),
-    }
 
-    logger.info("Heartbeat running pipeline: think → subconscious → dream → sleep")
-    run_pipeline(ctx, _HEARTBEAT_STEPS, initial_state=initial_state)
+def _get_organize_tools() -> list[dict]:
+    """Assemble tool schemas for organize session (organize + graph)."""
+    from library.tools.graph import GRAPH_TOOL_SCHEMAS
+    from library.tools.organize import ORGANIZE_TOOL_SCHEMAS
+    return ORGANIZE_TOOL_SCHEMAS + GRAPH_TOOL_SCHEMAS
 
-    # Update slow net with sleep output
+
+def _run_think_phase(ctx: InstanceContext, weights: dict, variables: dict) -> None:
+    """Run one think phase iteration."""
+    from library.tools.patterns import thinking_session
+
+    thinking = ctx.read("thinking.md") or ""
+    concerns = ctx.read("concerns.md") or ""
+    dreams = ctx.read("dreams.md") or ""
+    sleep_output = ctx.read("sleep.md") or ""
+    reviews = ctx.read("reviews.md") or ""
+    rep_summary = _graph_map_summary(ctx)
+
+    think_template = (_SPECIES_DIR / "prompts" / "think.md").read_text()
+    think_system = _inject_segments(
+        think_template, _REGISTRY, weights, variables,
+        ["identity", "state", "meta"],
+    )
+
+    thinking_context = _build_context(
+        ("Your Concerns", concerns),
+        ("Your Dreams", dreams),
+        ("Your Sleep Consolidation", sleep_output),
+        ("Recent Reviews", reviews),
+        ("Representation State", rep_summary),
+        ("Your Current Thoughts", thinking),
+    ) or "This is your first thinking session."
+
+    thinking_session(
+        ctx,
+        system=think_system,
+        initial_message=thinking_context,
+        max_tokens=16384,
+        extra_tools=_get_thinking_tools(),
+    )
+
+
+def _run_organize_phase(ctx: InstanceContext, weights: dict, variables: dict) -> None:
+    """Run the organize phase — a tool-use session for knowledge management."""
+    from library.tools.patterns import thinking_session
+
+    organize_template = (_SPECIES_DIR / "prompts" / "organize.md").read_text()
+    organize_system = _inject_segments(
+        organize_template, _REGISTRY, weights, variables,
+        ["identity"],
+    )
+
+    # Build context: current thinking + knowledge summary
+    from library.tools.organize import _list_category_names, _list_topics_in_category
+    categories = _list_category_names(ctx)
+    knowledge_lines = []
+    for cat in categories:
+        topics = _list_topics_in_category(ctx, cat)
+        knowledge_lines.append(f"- {cat}: {len(topics)} topics ({', '.join(topics[:5])}{'...' if len(topics) > 5 else ''})")
+    knowledge_summary = "\n".join(knowledge_lines) if knowledge_lines else "No knowledge categories yet."
+
+    thinking = ctx.read("thinking.md") or ""
+    organize_context = _build_context(
+        ("Your Current Thoughts", thinking),
+        ("Knowledge Structure", knowledge_summary),
+    )
+
+    thinking_session(
+        ctx,
+        system=organize_system,
+        initial_message=organize_context,
+        max_tokens=8192,
+        extra_tools=_get_organize_tools(),
+    )
+
+
+def _run_subconscious_phase(ctx: InstanceContext, weights: dict, variables: dict) -> None:
+    """Run the subconscious phase — surfaces concerns from thinking + dreams."""
+    from library.tools.patterns import llm_generate
+
+    subconscious_template = (_SPECIES_DIR / "prompts" / "subconscious.md").read_text()
+    subconscious_system = _inject_segments(
+        subconscious_template, _REGISTRY, weights, variables,
+        ["state"],
+    )
+
+    thinking = ctx.read("thinking.md") or ""
+    dreams = ctx.read("dreams.md") or ""
+    content = _build_context(
+        ("Your Thoughts", thinking),
+        ("Your Dreams", dreams),
+    )
+
+    result = llm_generate(ctx, system=subconscious_system, content=content, max_tokens=4096)
+    ctx.write("concerns.md", result)
+
+
+def _run_dream_phase(ctx: InstanceContext, weights: dict, variables: dict) -> None:
+    """Run the dream phase — associative processing from thinking + concerns."""
+    from library.tools.patterns import llm_generate
+
+    dreaming_template = (_SPECIES_DIR / "prompts" / "dreaming.md").read_text()
+    dreaming_system = _inject_segments(
+        dreaming_template, _REGISTRY, weights, variables,
+        ["identity"],
+    )
+
+    thinking = ctx.read("thinking.md") or ""
+    concerns = ctx.read("concerns.md") or ""
+    content = _build_context(
+        ("Your Thoughts", thinking),
+        ("Your Concerns", concerns),
+    )
+
+    result = llm_generate(ctx, system=dreaming_system, content=content, max_tokens=4096)
+    ctx.write("dreams.md", result)
+
+
+def _run_sleep_phase(ctx: InstanceContext) -> None:
+    """Run the sleep phase — consolidation and self-description."""
+    from library.tools.patterns import llm_generate
+
+    sleep_system = (_SPECIES_DIR / "prompts" / "sleep.md").read_text()
+
+    thinking = ctx.read("thinking.md") or ""
+    concerns = ctx.read("concerns.md") or ""
+    dreams = ctx.read("dreams.md") or ""
+    reviews = ctx.read("reviews.md") or ""
+    prev_sleep = ctx.read("sleep.md") or ""
+    content = _build_context(
+        ("Your Thoughts", thinking),
+        ("Your Concerns", concerns),
+        ("Your Dreams", dreams),
+        ("Session Reviews", reviews),
+        ("Previous Sleep Output", prev_sleep),
+    )
+
+    result = llm_generate(ctx, system=sleep_system, content=content, max_tokens=8192)
+    ctx.write("sleep.md", result)
+
+
+# --- Entry points ---
+
+def heartbeat(ctx: InstanceContext) -> None:
+    """Slow cycle with variable iteration.
+
+    Phase sequence is determined by shared behavioral parameters:
+    - Think can repeat (controlled by processing_depth, max 3 iterations)
+    - Organize is probabilistic (controlled by organization_drive)
+    - Dream is probabilistic (controlled by creative_latitude)
+    - Subconscious and sleep always run
+    """
+    logger.info("Heartbeat starting (instance=%s)", ctx.instance_id)
+
+    weights, variables, shared_params = _load_weights_and_variables(ctx)
+
+    schedule_config = {}
+    try:
+        raw = getattr(ctx, "instance_config", None)
+        if raw is not None:
+            sched = getattr(raw, "schedule", None)
+            if isinstance(sched, dict):
+                schedule_config = sched
+    except AttributeError:
+        pass
+
+    phases = _build_heartbeat_phases(shared_params, schedule_config)
+    logger.info("Heartbeat phases: %s", " → ".join(phases))
+
+    # Snapshot state before phases for metrics delta computation
+    pre_snapshot = _snapshot_counts(ctx)
+
+    phase_count = 0
+    think_count = 0
+    max_phases = int(schedule_config.get("max_phases_per_heartbeat", 8))
+
+    for phase in phases:
+        if phase_count >= max_phases:
+            logger.info("Heartbeat phase cap reached (%d), skipping remaining", max_phases)
+            break
+        phase_count += 1
+
+        logger.info("Heartbeat running phase: %s (%d/%d)", phase, phase_count, len(phases))
+
+        if phase == "think":
+            _run_think_phase(ctx, weights, variables)
+            think_count += 1
+        elif phase == "organize":
+            _run_organize_phase(ctx, weights, variables)
+        elif phase == "subconscious":
+            _run_subconscious_phase(ctx, weights, variables)
+        elif phase == "dream":
+            _run_dream_phase(ctx, weights, variables)
+        elif phase == "sleep":
+            _run_sleep_phase(ctx)
+        else:
+            logger.warning("Unknown heartbeat phase: %s", phase)
+
+    # Build session metrics from pre/post snapshots
+    metrics = _build_session_metrics(ctx, pre_snapshot, think_count)
+    logger.info(
+        "Session metrics: thinks=%d, graph +%d/%d nodes +%d/%d edges, "
+        "topics +%d/%d, archived=%d chars",
+        metrics.think_iterations,
+        metrics.graph_nodes_added, metrics.graph_nodes_total,
+        metrics.graph_edges_added, metrics.graph_edges_total,
+        metrics.topics_added, metrics.topics_total,
+        metrics.thoughts_archived_chars,
+    )
+
+    # Update slow net with sleep output + activity signals
     new_sleep = ctx.read("sleep.md") or ""
     if new_sleep:
         logger.info("Heartbeat sleep output: %d chars, updating slow net", len(new_sleep))
-        _update_slow_net(ctx, new_sleep, f"heartbeat_{ctx.instance_id}")
+        _update_slow_net(ctx, new_sleep, f"heartbeat_{ctx.instance_id}", metrics)
     else:
         logger.info("Heartbeat: no sleep output produced")
 
@@ -561,7 +828,57 @@ def heartbeat(ctx: InstanceContext) -> None:
     except Exception as exc:
         logger.warning("Post-heartbeat render failed: %s", exc)
 
-    logger.info("Heartbeat complete, reviews cleared")
+    logger.info("Heartbeat complete (phases=%d, reviews cleared)", phase_count)
+
+
+def _on_message_rate_limited(
+    ctx: InstanceContext,
+    events_text: str,
+    thinking: str,
+    weights: dict,
+    variables: dict,
+    shared_params: dict,
+) -> None:
+    """Abbreviated on_message for rate-limited situations.
+
+    Runs gut + review only (2 LLM calls instead of 4). No reply is generated
+    or sent, but the fast net still learns from the observation.
+    """
+    from library.tools.patterns import llm_generate
+
+    # Gut phase
+    gut_template = (_SPECIES_DIR / "prompts" / "gut.md").read_text()
+    gut_system = _inject_segments(
+        gut_template, _REGISTRY, weights, variables,
+        ["state", "relational"],
+    )
+    gut_context = _build_context(
+        ("Incoming Messages", events_text),
+        ("Your Thoughts", thinking),
+    )
+    gut_output = llm_generate(ctx, system=gut_system, content=gut_context, max_tokens=4096)
+
+    # Review phase (no reply to review, but we still assess the conversation)
+    review_system = (_SPECIES_DIR / "prompts" / "review.md").read_text()
+    review_context = _build_context(
+        ("Incoming Messages", events_text),
+        ("Your Thoughts", thinking),
+        ("Gut Assessment", gut_output),
+    )
+    review = llm_generate(ctx, system=review_system, content=review_context, max_tokens=4096)
+
+    # Update fast net with review signals
+    if review:
+        logger.info("Rate-limited review: %d chars, updating fast net", len(review))
+        ctx.write("last_review.md", review)
+        existing = ctx.read("reviews.md") or ""
+        ctx.write("reviews.md", f"{existing}\n---\n{review}".strip())
+
+        # Mechanical signals: no reply was generated
+        review_with_mechanical = f"{review}\nreply_length: 0.000\nreply_sent: 0.0"
+        _update_fast_net(ctx, review_with_mechanical)
+
+    logger.info("on_message rate-limited complete (gut + review only)")
 
 
 def on_message(ctx: InstanceContext, events: list[Event]) -> None:
@@ -578,7 +895,13 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
     sleep_output = ctx.read("sleep.md") or ""
     rep_summary = _graph_map_summary(ctx)
 
-    weights, variables = _load_weights_and_variables(ctx)
+    weights, variables, shared_params = _load_weights_and_variables(ctx)
+
+    # --- Rate-limited abbreviated pipeline: gut + review only ---
+    rate_limited = getattr(ctx, "_reply_rate_limited", False) is True
+    if rate_limited:
+        logger.info("on_message rate-limited: running gut + review only (silent learning)")
+        return _on_message_rate_limited(ctx, events_text, thinking, weights, variables, shared_params)
 
     # Build system prompts with segment injection
     gut_template = (_SPECIES_DIR / "prompts" / "gut.md").read_text()
@@ -628,11 +951,40 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
     logger.info("on_message running pipeline: gut → suggest → reply → review")
     state = run_pipeline(ctx, _ON_MESSAGE_STEPS, events=events, initial_state=initial_state)
 
+    # --- Reply gating ---
+    nn_available = shared_params.get("_nn_available", False)
     response = state.get("response", "")
-    if response and response.strip():
+    reply_sent = False
+
+    if nn_available:
+        # Extract reply_value from gut output
+        gut_output = state.get("gut_feeling", "")
+        gut_signals = _parse_review_signals(gut_output)
+        reply_value = gut_signals.get("reply_value", 1.0)
+
+        reply_willingness = shared_params.get("reply_willingness", 0.5)
+
+        should_reply = probabilistic(
+            reply_value * reply_willingness,
+            label="reply_decision",
+        )
+        logger.info(
+            "Reply gating: reply_value=%.2f, reply_willingness=%.2f, "
+            "probability=%.3f, decision=%s",
+            reply_value, reply_willingness,
+            reply_value * reply_willingness, should_reply,
+        )
+    else:
+        # No NN — always reply (deterministic old behavior)
+        should_reply = True
+
+    if should_reply and response and response.strip():
         target = _target_room(events, ctx)
         logger.info("on_message sending reply (%d chars) to %s", len(response.strip()), target)
         ctx.send(target, response.strip())
+        reply_sent = True
+    elif not should_reply:
+        logger.info("on_message: reply suppressed by gating")
     else:
         logger.info("on_message: no reply generated")
 
@@ -644,10 +996,35 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
         existing = ctx.read("reviews.md") or ""
         ctx.write("reviews.md", f"{existing}\n---\n{review}".strip())
 
-        # Update fast net with review signals
-        _update_fast_net(ctx, review)
+        # Inject mechanical signal: reply_length
+        from library.tools.neural import normalize_reply_length
+        reply_length_val = normalize_reply_length(response) if response else 0.0
+        review_with_mechanical = f"{review}\nreply_length: {reply_length_val:.3f}"
+
+        # Inject reply gating signals
+        if not reply_sent:
+            review_with_mechanical += "\nreply_sent: 0.0"
+            # Heuristic silence_confidence: higher when reply_value is low
+            # and reply_willingness is low
+            gut_output = state.get("gut_feeling", "")
+            gut_signals = _parse_review_signals(gut_output)
+            rv = gut_signals.get("reply_value", 1.0)
+            rw = shared_params.get("reply_willingness", 0.5)
+            silence_confidence = rv * (1.0 - rw)
+            review_with_mechanical += f"\nsilence_confidence: {silence_confidence:.3f}"
+
+        # Update fast net with review signals (including mechanical)
+        _update_fast_net(ctx, review_with_mechanical)
     else:
         logger.info("on_message: no review output")
+
+    # --- Optional post-reply extra thinking (step 10) ---
+    nn_available = shared_params.get("_nn_available", False)
+    if nn_available:
+        processing_depth = shared_params.get("processing_depth", 0.5)
+        if probabilistic(processing_depth * 0.3, label="post_reply_think"):
+            logger.info("on_message: running post-reply extra thinking")
+            _run_think_phase(ctx, weights, variables)
 
 
 class NeuralDreamer(Species):

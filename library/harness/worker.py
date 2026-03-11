@@ -63,6 +63,11 @@ class Worker:
         if stale_cleaned:
             logger.info("Cleaned up %d stale job guard(s)", stale_cleaned)
 
+        # Clean up stale provider slots from crashed workers
+        stale_slots = self._cleanup_stale_provider_slots()
+        if stale_slots:
+            logger.info("Cleaned up %d stale provider slot(s)", stale_slots)
+
         pending_jobs = self._queue.list_pending()
         pending_instances = sorted({job.instance_id for job in pending_jobs})
         logger.info(
@@ -176,6 +181,10 @@ class Worker:
             logger.exception("Error in %s", job.instance_id)
         finally:
             sent_count = self._coerce_int(getattr(ctx, "sent_message_count", 0) if ctx is not None else 0, 0)
+            # Record reply for rate limiting
+            if sent_count > 0:
+                Checker.record_reply_sent(self._checker_store, job.instance_id)
+                logger.info("Recorded reply sent for %s (rate limit tracking)", job.instance_id)
             if ctx is not None and heartbeat_gate_used and sent_count > 0:
                 seen_key = self._heartbeat_seen_key(job.instance_id)
                 self._checker_store.put(seen_key, heartbeat_external_count)
@@ -211,18 +220,37 @@ class Worker:
             events = payload.get("events")
             event_count = len(events) if isinstance(events, list) else 0
             allow = event_count > 0
+
+            # Check reply rate limits
+            rate_limited = False
+            if allow:
+                config = self._registry.get_instance_config(job.instance_id)
+                schedule_config = config.schedule if isinstance(config.schedule, dict) else {}
+                if not Checker.check_reply_rate(self._checker_store, job.instance_id, schedule_config):
+                    rate_limited = True
+                    allow = False
+                    ctx._reply_rate_limited = True
+                    logger.info(
+                        "Reply rate-limited for %s (cooldown or hourly cap reached)",
+                        job.instance_id,
+                    )
+
             ctx.configure_send_policy(
                 allow_send=allow,
                 max_sends=1 if allow else 0,
-                reason="on_message sends require external events and are limited to one message",
+                reason=(
+                    "on_message reply rate-limited" if rate_limited
+                    else "on_message sends require external events and are limited to one message"
+                ),
             )
             logger.info(
-                "Configured send policy for %s.%s (allow=%s max_sends=%d events=%d)",
+                "Configured send policy for %s.%s (allow=%s max_sends=%d events=%d rate_limited=%s)",
                 job.instance_id,
                 entry_point,
                 allow,
                 1 if allow else 0,
                 event_count,
+                rate_limited,
             )
             return False, 0
 
@@ -313,6 +341,27 @@ class Worker:
 
     def _release_provider_slot(self, slot_key: str) -> None:
         self._slots_store.release(slot_key, self._worker_id)
+
+    def _cleanup_stale_provider_slots(self) -> int:
+        """
+        Release provider slots owned by workers that are no longer running.
+        
+        Since the worker runs ephemerally (not as a long-lived daemon), any
+        owned slot from a previous run is stale and should be released.
+        
+        Returns the number of slots cleaned up.
+        """
+        stale_count = 0
+        all_slots = self._slots_store.scan_items()  # [(key, value, owner), ...]
+        
+        for key, _, owner in all_slots:
+            if owner is not None:
+                # Any owned slot is stale (worker IDs are unique per run)
+                self._slots_store.release(key, owner)
+                stale_count += 1
+                logger.debug("Released stale provider slot %s (owned by %s)", key, owner)
+        
+        return stale_count
 
     # ------------------------------------------------------------------
     # Context construction

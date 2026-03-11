@@ -22,7 +22,7 @@ def generate_with_identity(
     prompt: str,
     context: str = "",
     model: str = "",
-    max_tokens: int = 2048,
+    max_tokens: int = 4096,
 ) -> str:
     """Generate text via the identity's model/provider, with persona in system prompt.
 

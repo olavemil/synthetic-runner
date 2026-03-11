@@ -64,7 +64,7 @@ def _write_index_files(out_dir: Path) -> int:
             continue
 
         md_files = sorted(instance_dir.rglob("*.md"))
-        md_files = [f for f in md_files if f.name != "index.md"]
+        md_files = [f for f in md_files if f.name not in ("index.md", "_meta.md")]
         if not md_files:
             continue
 
@@ -102,10 +102,27 @@ def _write_index_files(out_dir: Path) -> int:
             lines.append("")
             lines.append(f"### {_display_name(subdir_name)} ({len(files)})")
             lines.append("")
-            for md_file in files:
-                rel = md_file.relative_to(instance_dir)
-                display = _display_name(md_file.stem)
-                lines.append(f"- [{display}]({rel.with_suffix('')})")
+
+            if subdir_name == "knowledge":
+                # Group knowledge topics by category (second path component)
+                categories: dict[str, list[Path]] = {}
+                for md_file in files:
+                    rel = md_file.relative_to(instance_dir)
+                    category = rel.parts[1] if len(rel.parts) > 2 else "uncategorized"
+                    categories.setdefault(category, []).append(md_file)
+                for cat_name in sorted(categories):
+                    lines.append(f"#### {_display_name(cat_name)}")
+                    lines.append("")
+                    for md_file in sorted(categories[cat_name]):
+                        rel = md_file.relative_to(instance_dir)
+                        display = _display_name(md_file.stem)
+                        lines.append(f"- [{display}]({rel.with_suffix('')})")
+                    lines.append("")
+            else:
+                for md_file in files:
+                    rel = md_file.relative_to(instance_dir)
+                    display = _display_name(md_file.stem)
+                    lines.append(f"- [{display}]({rel.with_suffix('')})")
 
         # Published HTML visualizations
         published_dir = instance_dir / "_published"

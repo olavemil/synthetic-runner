@@ -269,4 +269,8 @@ def handle_tool(ctx: InstanceContext, name: str, arguments: dict) -> tuple[str, 
         from library.tools.activation_map import handle_map_tool
         return handle_map_tool(ctx, name, arguments), False
 
+    if name.startswith("organize_"):
+        from library.tools.organize import handle_organize_tool
+        return handle_organize_tool(ctx, name, arguments), False
+
     return f"Unknown tool: {name}", False

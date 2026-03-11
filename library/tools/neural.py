@@ -62,6 +62,8 @@ FAST_SIGNAL_NAMES = [
     "unresolved",       # 0-1
     "external_valence", # -1 to 1
     "novelty",          # 0-1
+    "reply_length",     # 0-1 (mechanical: normalized char count)
+    "reply_entropy",    # 0-1 (from review: lexical/structural diversity)
 ]
 
 # Slow net input signals (from sleep phase)
@@ -91,6 +93,26 @@ SLOW_VARIABLE_NAMES = [
     "reflection_depth",
 ]
 
+# Shared behavioral parameters — both nets produce values, blended at decode time.
+SHARED_PARAMETER_NAMES = [
+    "reply_willingness",
+    "processing_depth",
+    "engagement_level",
+    "organization_drive",
+    "creative_latitude",
+    "caution",
+]
+
+# Blend weights: (slow_weight, fast_weight) — must sum to 1.0
+SHARED_BLEND_WEIGHTS: dict[str, tuple[float, float]] = {
+    "reply_willingness": (0.4, 0.6),
+    "processing_depth": (0.6, 0.4),
+    "engagement_level": (0.3, 0.7),
+    "organization_drive": (0.7, 0.3),
+    "creative_latitude": (0.5, 0.5),
+    "caution": (0.6, 0.4),
+}
+
 
 # Graph summary features for slow net input
 GRAPH_FEATURE_NAMES = [
@@ -115,6 +137,45 @@ MAP_FEATURE_NAMES = [
     "map_active_fraction",# fraction of non-zero cells
     "map_asymmetry",      # difference between positive and negative mass
 ]
+
+# Heartbeat activity signals for slow net input
+SLOW_ACTIVITY_SIGNAL_NAMES = [
+    "think_iterations",
+    "think_tokens",
+    "graph_nodes_added",
+    "graph_nodes_total",
+    "graph_edges_added",
+    "graph_edges_total",
+    "map_cells_changed",
+    "topics_added",
+    "topics_total",
+    "topics_modified",
+    "thoughts_archived",
+    "tool_calls_total",
+]
+
+
+@dataclass
+class SessionMetrics:
+    """Accumulated activity counters for a heartbeat session.
+
+    Passed through the pipeline state and updated by tool dispatch and phase wrappers.
+    Encoded into slow net input signals at session end.
+    """
+    think_iterations: int = 0
+    think_tokens: int = 0
+    graph_nodes_added: int = 0
+    graph_edges_added: int = 0
+    map_cells_changed: int = 0
+    topics_added: int = 0
+    topics_modified: int = 0
+    thoughts_archived_chars: int = 0
+    thinking_chars_pre_session: int = 0
+    tool_calls: int = 0
+    # Snapshot totals — populated at session end
+    graph_nodes_total: int = 0
+    graph_edges_total: int = 0
+    topics_total: int = 0
 
 
 @dataclass
@@ -274,16 +335,44 @@ def encode_map_features(m: Any) -> list[float]:
     ]
 
 
+def encode_activity_signals(metrics: SessionMetrics) -> list[float]:
+    """Encode heartbeat session activity into signals for slow net input.
+
+    Uses soft normalization (sigmoid squash) with per-signal midpoints
+    so typical session activity lands in the 0.3-0.7 range.
+    """
+    thinking_chars_pre = metrics.thinking_chars_pre_session
+    archived_ratio = min(metrics.thoughts_archived_chars / thinking_chars_pre, 1.0) if thinking_chars_pre > 0 else 0.0
+
+    return [
+        _soft_normalize(metrics.think_iterations, 2.0),
+        _soft_normalize(metrics.think_tokens, 4000.0),
+        _soft_normalize(metrics.graph_nodes_added, 3.0),
+        _soft_normalize(metrics.graph_nodes_total, 50.0),
+        _soft_normalize(metrics.graph_edges_added, 5.0),
+        _soft_normalize(metrics.graph_edges_total, 100.0),
+        metrics.map_cells_changed,  # already 0-1 (fraction)
+        _soft_normalize(metrics.topics_added, 2.0),
+        _soft_normalize(metrics.topics_total, 25.0),
+        _soft_normalize(metrics.topics_modified, 2.0),
+        archived_ratio,  # already 0-1 (ratio)
+        _soft_normalize(metrics.tool_calls, 10.0),
+    ]
+
+
 def decode_fast_output(values: list[float], segment_ids: list[str]) -> dict:
     """Decode fast net output into segment weights and variables.
 
-    Output layout: [segment_weights..., variables...]
+    Output layout: [segment_weights..., variables..., shared_params...]
+    Shared params are optional — if the output is only long enough for
+    segments + variables, an empty shared dict is returned.
     """
     n_segments = len(segment_ids)
     n_vars = len(FAST_VARIABLE_NAMES)
+    n_shared = len(SHARED_PARAMETER_NAMES)
     expected = n_segments + n_vars
 
-    # Pad or truncate
+    # Pad to minimum (segments + variables) only
     if len(values) < expected:
         values = values + [0.5] * (expected - len(values))
 
@@ -292,13 +381,28 @@ def decode_fast_output(values: list[float], segment_ids: list[str]) -> dict:
         name: _sigmoid(values[n_segments + i])
         for i, name in enumerate(FAST_VARIABLE_NAMES)
     }
-    return {"weights": weights, "variables": variables}
+
+    shared: dict[str, float] = {}
+    shared_start = n_segments + n_vars
+    if len(values) >= shared_start + n_shared:
+        shared = {
+            name: _sigmoid(values[shared_start + i])
+            for i, name in enumerate(SHARED_PARAMETER_NAMES)
+        }
+
+    return {"weights": weights, "variables": variables, "shared": shared}
 
 
 def decode_slow_output(values: list[float], segment_ids: list[str]) -> dict:
-    """Decode slow net output into segment weights and variables."""
+    """Decode slow net output into segment weights and variables.
+
+    Output layout: [segment_weights..., variables..., shared_params...]
+    Shared params are optional — if the output is only long enough for
+    segments + variables, an empty shared dict is returned.
+    """
     n_segments = len(segment_ids)
     n_vars = len(SLOW_VARIABLE_NAMES)
+    n_shared = len(SHARED_PARAMETER_NAMES)
     expected = n_segments + n_vars
 
     if len(values) < expected:
@@ -309,7 +413,33 @@ def decode_slow_output(values: list[float], segment_ids: list[str]) -> dict:
         name: _sigmoid(values[n_segments + i])
         for i, name in enumerate(SLOW_VARIABLE_NAMES)
     }
-    return {"weights": weights, "variables": variables}
+
+    shared: dict[str, float] = {}
+    shared_start = n_segments + n_vars
+    if len(values) >= shared_start + n_shared:
+        shared = {
+            name: _sigmoid(values[shared_start + i])
+            for i, name in enumerate(SHARED_PARAMETER_NAMES)
+        }
+
+    return {"weights": weights, "variables": variables, "shared": shared}
+
+
+def blend_shared_parameters(
+    fast_shared: dict[str, float],
+    slow_shared: dict[str, float],
+) -> dict[str, float]:
+    """Blend shared parameter values from both nets using fixed weights.
+
+    If a parameter is missing from one net's output, use 0.5 (neutral) for that net.
+    """
+    result = {}
+    for name in SHARED_PARAMETER_NAMES:
+        slow_w, fast_w = SHARED_BLEND_WEIGHTS[name]
+        slow_val = slow_shared.get(name, 0.5)
+        fast_val = fast_shared.get(name, 0.5)
+        result[name] = slow_w * slow_val + fast_w * fast_val
+    return result
 
 
 def _sigmoid(x: float) -> float:
@@ -317,6 +447,26 @@ def _sigmoid(x: float) -> float:
     import math
     x = max(-10.0, min(10.0, x))
     return 1.0 / (1.0 + math.exp(-x))
+
+
+def _soft_normalize(value: float, midpoint: float) -> float:
+    """Sigmoid normalization: 0.5 at midpoint, saturates gracefully.
+
+    Used for mechanical signals like reply length and activity counts.
+    Returns 0.0 for value <= 0, ~0.5 at midpoint, ~0.95 at 3x midpoint.
+    """
+    if value <= 0:
+        return 0.0
+    import math
+    return 1.0 / (1.0 + math.exp(-(value - midpoint) / (midpoint * 0.4)))
+
+
+def normalize_reply_length(text: str, midpoint: int = 800) -> float:
+    """Normalize reply character count to 0-1 range.
+
+    Returns 0.0 for empty text, ~0.5 at midpoint chars, saturates for long replies.
+    """
+    return _soft_normalize(len(text), float(midpoint))
 
 
 # ---------------------------------------------------------------------------
@@ -344,20 +494,24 @@ def make_fast_net_config(
     num_layers: int = 3,
     learning_rate: float = 0.01,
     include_map_features: bool = False,
+    include_shared_params: bool = False,
 ) -> NetConfig:
     """Create config for a fast net.
 
-    Input: review signals (7) + optional map features (8)
-    Output: segment weights + fast variables
+    Input: review signals (9) + optional map features (8)
+    Output: segment weights + fast variables + optional shared params
     """
     input_dim = len(FAST_SIGNAL_NAMES)
     if include_map_features:
         input_dim += len(MAP_FEATURE_NAMES)
+    output_dim = num_segments + len(FAST_VARIABLE_NAMES)
+    if include_shared_params:
+        output_dim += len(SHARED_PARAMETER_NAMES)
     return NetConfig(
         input_dim=input_dim,
         hidden_dim=hidden_dim,
         num_layers=num_layers,
-        output_dim=num_segments + len(FAST_VARIABLE_NAMES),
+        output_dim=output_dim,
         learning_rate=learning_rate,
     )
 
@@ -370,20 +524,27 @@ def make_slow_net_config(
     learning_rate: float = 0.001,
     weight_decay: float = 0.01,
     include_graph_features: bool = False,
+    include_shared_params: bool = False,
+    include_activity_signals: bool = False,
 ) -> NetConfig:
     """Create config for a slow net.
 
-    Input: sleep signals (4) + optional graph features (8)
-    Output: segment weights + slow variables
+    Input: sleep signals (4) + optional graph features (8) + optional activity signals (12)
+    Output: segment weights + slow variables + optional shared params
     """
     input_dim = len(SLOW_SIGNAL_NAMES)
     if include_graph_features:
         input_dim += len(GRAPH_FEATURE_NAMES)
+    if include_activity_signals:
+        input_dim += len(SLOW_ACTIVITY_SIGNAL_NAMES)
+    output_dim = num_segments + len(SLOW_VARIABLE_NAMES)
+    if include_shared_params:
+        output_dim += len(SHARED_PARAMETER_NAMES)
     return NetConfig(
         input_dim=input_dim,
         hidden_dim=hidden_dim,
         num_layers=num_layers,
-        output_dim=num_segments + len(SLOW_VARIABLE_NAMES),
+        output_dim=output_dim,
         learning_rate=learning_rate,
         weight_decay=weight_decay,
     )

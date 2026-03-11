@@ -53,8 +53,12 @@ class DummyCtx:
 
     def llm(self, messages, **kwargs):
         if self._llm_fn:
-            return self._llm_fn(messages, **kwargs)
-        return SimpleNamespace(message="LLM response.")
+            raw = self._llm_fn(messages, **kwargs)
+            # Ensure tool_calls attribute exists for thinking_session compatibility
+            if not hasattr(raw, "tool_calls"):
+                raw.tool_calls = []
+            return raw
+        return SimpleNamespace(message="LLM response.", tool_calls=[])
 
 
 def _event(body="hello", room="main", event_id="$1", timestamp=1):
@@ -243,3 +247,60 @@ class TestHecateHeartbeat:
         assert "## Your Previous Thoughts\nAria thought round 0" in second_system
         assert "## Memory Directory Snapshot (before iteration)" in second_system
         assert "### aria_thinking.md" in second_system
+
+
+class TestHecateOrganizePhase:
+    def test_heartbeat_runs_organize_after_thinking(self):
+        """Heartbeat should run an organize tool-use session after thinking iterations."""
+        from library.harness.providers import LLMResponse, ToolCall
+
+        organize_called = [False]
+
+        def llm_fn(messages, **kwargs):
+            tools = kwargs.get("tools", [])
+            tool_names = [t["function"]["name"] for t in tools]
+            if "organize_list_categories" in tool_names:
+                organize_called[0] = True
+                # End the organize session immediately
+                return LLMResponse(message="", tool_calls=[
+                    ToolCall(id="t1", name="done", arguments={"summary": "organized"}),
+                ])
+            return LLMResponse(message="voice thought", tool_calls=[])
+
+        ctx = DummyCtx(THREE_VOICES_CFG, llm_fn=llm_fn)
+        heartbeat(ctx)
+
+        assert organize_called[0], "Organize phase should have been called with organize tools"
+
+    def test_organize_phase_can_write_topics(self):
+        """Organize phase can create knowledge topics via tool calls."""
+        from library.harness.providers import LLMResponse, ToolCall
+
+        organize_turn = [0]
+
+        def llm_fn(messages, **kwargs):
+            tools = kwargs.get("tools", [])
+            tool_names = [t["function"]["name"] for t in tools]
+            if "organize_list_categories" in tool_names:
+                turn = organize_turn[0]
+                organize_turn[0] += 1
+                if turn == 0:
+                    # First call: write a topic
+                    return LLMResponse(message="", tool_calls=[
+                        ToolCall(id="t1", name="organize_write_topic", arguments={
+                            "category": "concepts",
+                            "topic": "deliberation",
+                            "content": "Three voices deliberate to reach consensus.",
+                        }),
+                    ])
+                else:
+                    return LLMResponse(message="", tool_calls=[
+                        ToolCall(id="t2", name="done", arguments={}),
+                    ])
+            return LLMResponse(message="voice thought", tool_calls=[])
+
+        ctx = DummyCtx(THREE_VOICES_CFG, llm_fn=llm_fn)
+        heartbeat(ctx)
+
+        assert "knowledge/concepts/deliberation.md" in ctx._files
+        assert "Three voices" in ctx._files["knowledge/concepts/deliberation.md"]

@@ -139,3 +139,83 @@ class TestSyncWithPrefix:
         changed = sync_instances(instances_dir, repo, prefix="project-a", push=False)
         assert changed is True
         assert (repo / "project-a" / "alpha" / "thinking.md").exists()
+
+
+class TestSyncKnowledgeAndArchive:
+    def test_knowledge_subdir_synced(self, tmp_path, data_repo):
+        """knowledge/ subfolders are included in sync."""
+        inst = tmp_path / "instances"
+        mem = inst / "alpha" / "memory"
+        (mem / "knowledge" / "concepts").mkdir(parents=True)
+        (mem / "knowledge" / "concepts" / "_meta.md").write_text("# concepts\n")
+        (mem / "knowledge" / "concepts" / "trust.md").write_text("Trust content.")
+        (mem / "thinking.md").write_text("thoughts")
+
+        sync_instances(inst, data_repo, push=False)
+
+        assert (data_repo / "alpha" / "knowledge" / "concepts" / "trust.md").exists()
+        assert (data_repo / "alpha" / "knowledge" / "concepts" / "_meta.md").exists()
+
+    def test_archive_subdir_synced(self, tmp_path, data_repo):
+        """archive/ entries are included in sync."""
+        inst = tmp_path / "instances"
+        mem = inst / "alpha" / "memory"
+        (mem / "archive").mkdir(parents=True)
+        (mem / "archive" / "2024-01-01_120000.md").write_text("Old thoughts.")
+        (mem / "thinking.md").write_text("thoughts")
+
+        sync_instances(inst, data_repo, push=False)
+
+        assert (data_repo / "alpha" / "archive" / "2024-01-01_120000.md").exists()
+
+    def test_meta_files_excluded_from_index(self, tmp_path, data_repo):
+        """_meta.md files should not appear in generated index.md."""
+        inst = tmp_path / "instances"
+        mem = inst / "alpha" / "memory"
+        (mem / "knowledge" / "concepts").mkdir(parents=True)
+        (mem / "knowledge" / "concepts" / "_meta.md").write_text("# concepts\n")
+        (mem / "knowledge" / "concepts" / "trust.md").write_text("Trust content.")
+        (mem / "thinking.md").write_text("thoughts")
+
+        sync_instances(inst, data_repo, push=False)
+
+        index = (data_repo / "alpha" / "index.md").read_text()
+        assert "_meta" not in index
+        assert "trust" in index  # regular topics still appear
+
+    def test_knowledge_grouped_by_category_in_index(self, tmp_path, data_repo):
+        """Knowledge topics are grouped by category in the index."""
+        inst = tmp_path / "instances"
+        mem = inst / "alpha" / "memory"
+        (mem / "knowledge" / "concepts").mkdir(parents=True)
+        (mem / "knowledge" / "entities").mkdir(parents=True)
+        (mem / "knowledge" / "concepts" / "_meta.md").write_text("# concepts\n")
+        (mem / "knowledge" / "concepts" / "trust.md").write_text("Trust.")
+        (mem / "knowledge" / "entities" / "alice.md").write_text("Alice.")
+        (mem / "thinking.md").write_text("thoughts")
+
+        sync_instances(inst, data_repo, push=False)
+
+        index = (data_repo / "alpha" / "index.md").read_text()
+        assert "### Knowledge" in index
+        assert "#### Concepts" in index
+        assert "#### Entities" in index
+        assert "knowledge/concepts/trust" in index
+        assert "knowledge/entities/alice" in index
+        assert index.index("#### Concepts") < index.index("knowledge/concepts/trust")
+
+    def test_archive_listed_flat_in_index(self, tmp_path, data_repo):
+        """Archive entries appear as a flat list under ### Archive."""
+        inst = tmp_path / "instances"
+        mem = inst / "alpha" / "memory"
+        (mem / "archive").mkdir(parents=True)
+        (mem / "archive" / "2024-01-01_120000.md").write_text("Old thoughts.")
+        (mem / "archive" / "2024-01-02_090000.md").write_text("More thoughts.")
+        (mem / "thinking.md").write_text("thoughts")
+
+        sync_instances(inst, data_repo, push=False)
+
+        index = (data_repo / "alpha" / "index.md").read_text()
+        assert "### Archive" in index
+        assert "archive/2024-01-01_120000" in index
+        assert "archive/2024-01-02_090000" in index

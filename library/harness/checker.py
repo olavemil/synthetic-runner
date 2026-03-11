@@ -421,6 +421,94 @@ class Checker:
         return scheduled_instances
 
     # ------------------------------------------------------------------
+    # Reply rate limiting
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def check_reply_rate(store: NamespacedStore, instance_id: str, config: dict) -> bool:
+        """Check if the instance is allowed to reply based on rate limits.
+
+        Args:
+            store: The checker namespace store.
+            instance_id: The instance to check.
+            config: The instance's schedule config dict.
+
+        Returns:
+            True if the instance can reply, False if rate-limited.
+        """
+        now = time.time()
+
+        # Check cooldown
+        cooldown = config.get("reply_cooldown_seconds")
+        if cooldown is not None:
+            try:
+                cooldown = int(cooldown)
+            except (ValueError, TypeError):
+                cooldown = None
+
+        if cooldown is not None:
+            last_reply = store.get(f"last_reply_time:{instance_id}")
+            if last_reply is not None:
+                try:
+                    elapsed = now - float(last_reply)
+                    if elapsed < cooldown:
+                        return False
+                except (ValueError, TypeError):
+                    pass
+
+        # Check hourly cap
+        max_per_hour = config.get("max_replies_per_hour")
+        if max_per_hour is not None:
+            try:
+                max_per_hour = int(max_per_hour)
+            except (ValueError, TypeError):
+                max_per_hour = None
+
+        if max_per_hour is not None:
+            hour_start = store.get(f"reply_hour_start:{instance_id}")
+            hour_count = store.get(f"reply_count_hour:{instance_id}") or 0
+            try:
+                hour_start = float(hour_start) if hour_start is not None else 0.0
+                hour_count = int(hour_count)
+            except (ValueError, TypeError):
+                hour_start = 0.0
+                hour_count = 0
+
+            # Reset if hour has elapsed
+            if now - hour_start > 3600:
+                hour_start = now
+                hour_count = 0
+                store.put(f"reply_hour_start:{instance_id}", hour_start)
+                store.put(f"reply_count_hour:{instance_id}", 0)
+
+            if hour_count >= max_per_hour:
+                return False
+
+        return True
+
+    @staticmethod
+    def record_reply_sent(store: NamespacedStore, instance_id: str) -> None:
+        """Record that a reply was sent, updating rate limit counters."""
+        now = time.time()
+        store.put(f"last_reply_time:{instance_id}", now)
+
+        hour_start = store.get(f"reply_hour_start:{instance_id}")
+        hour_count = store.get(f"reply_count_hour:{instance_id}") or 0
+        try:
+            hour_start = float(hour_start) if hour_start is not None else 0.0
+            hour_count = int(hour_count)
+        except (ValueError, TypeError):
+            hour_start = 0.0
+            hour_count = 0
+
+        if now - hour_start > 3600:
+            hour_start = now
+            hour_count = 0
+
+        store.put(f"reply_hour_start:{instance_id}", hour_start)
+        store.put(f"reply_count_hour:{instance_id}", hour_count + 1)
+
+    # ------------------------------------------------------------------
     # Adapter management
     # ------------------------------------------------------------------
 

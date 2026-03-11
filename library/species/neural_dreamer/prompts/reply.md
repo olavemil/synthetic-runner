@@ -8,4 +8,4 @@ Write a genuine response. Don't explain your internal process. Don't hedge unles
 
 {segment_state}
 
-Be conscious of overall length
+Be conscious of overall length, and avoid undue repetition.

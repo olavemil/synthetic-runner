@@ -542,3 +542,68 @@ class TestCheckerReactive:
         assert enqueued is False
         messages = [r.getMessage() for r in caplog.records]
         assert any("Timeout polling inst-1/main" in m for m in messages)
+
+
+class TestReplyRateLimit:
+    """Tests for reply rate limiting."""
+
+    def _make_store(self):
+        store_db = open_store(":memory:")
+        return NamespacedStore(store_db, "checker")
+
+    def test_no_limits_configured(self):
+        store = self._make_store()
+        assert Checker.check_reply_rate(store, "inst-1", {}) is True
+
+    def test_cooldown_allows_after_elapsed(self):
+        store = self._make_store()
+        store.put("last_reply_time:inst-1", time.time() - 200)
+        assert Checker.check_reply_rate(store, "inst-1", {"reply_cooldown_seconds": 120}) is True
+
+    def test_cooldown_blocks_within_window(self):
+        store = self._make_store()
+        store.put("last_reply_time:inst-1", time.time() - 30)
+        assert Checker.check_reply_rate(store, "inst-1", {"reply_cooldown_seconds": 120}) is False
+
+    def test_hourly_cap_allows_under_limit(self):
+        store = self._make_store()
+        store.put("reply_hour_start:inst-1", time.time())
+        store.put("reply_count_hour:inst-1", 5)
+        assert Checker.check_reply_rate(store, "inst-1", {"max_replies_per_hour": 10}) is True
+
+    def test_hourly_cap_blocks_at_limit(self):
+        store = self._make_store()
+        store.put("reply_hour_start:inst-1", time.time())
+        store.put("reply_count_hour:inst-1", 10)
+        assert Checker.check_reply_rate(store, "inst-1", {"max_replies_per_hour": 10}) is False
+
+    def test_hourly_cap_resets_after_hour(self):
+        store = self._make_store()
+        store.put("reply_hour_start:inst-1", time.time() - 4000)  # > 1 hour ago
+        store.put("reply_count_hour:inst-1", 100)
+        assert Checker.check_reply_rate(store, "inst-1", {"max_replies_per_hour": 10}) is True
+
+    def test_record_reply_sent(self):
+        store = self._make_store()
+        Checker.record_reply_sent(store, "inst-1")
+        assert store.get("last_reply_time:inst-1") is not None
+        assert store.get("reply_count_hour:inst-1") == 1
+
+    def test_record_increments_count(self):
+        store = self._make_store()
+        Checker.record_reply_sent(store, "inst-1")
+        Checker.record_reply_sent(store, "inst-1")
+        assert store.get("reply_count_hour:inst-1") == 2
+
+    def test_both_limits_combined(self):
+        store = self._make_store()
+        # Within cooldown
+        store.put("last_reply_time:inst-1", time.time() - 30)
+        config = {"reply_cooldown_seconds": 120, "max_replies_per_hour": 100}
+        assert Checker.check_reply_rate(store, "inst-1", config) is False
+
+        # Past cooldown but at hourly limit
+        store.put("last_reply_time:inst-1", time.time() - 200)
+        store.put("reply_hour_start:inst-1", time.time())
+        store.put("reply_count_hour:inst-1", 100)
+        assert Checker.check_reply_rate(store, "inst-1", config) is False
