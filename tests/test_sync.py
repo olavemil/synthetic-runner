@@ -141,6 +141,126 @@ class TestSyncWithPrefix:
         assert (repo / "project-a" / "alpha" / "thinking.md").exists()
 
 
+class TestSyncCleanup:
+    def test_removed_source_file_deleted_from_dest(self, instances_dir, data_repo):
+        """Files deleted from source memory should be removed from the data repo."""
+        sync_instances(instances_dir, data_repo, push=False)
+        assert (data_repo / "alpha" / "dreams.md").exists()
+
+        # Delete the source file
+        (instances_dir / "alpha" / "memory" / "dreams.md").unlink()
+        changed = sync_instances(instances_dir, data_repo, push=False)
+
+        assert changed is True
+        assert not (data_repo / "alpha" / "dreams.md").exists()
+        # Other files still present
+        assert (data_repo / "alpha" / "thinking.md").exists()
+
+    def test_emptied_source_file_deleted_from_dest(self, instances_dir, data_repo):
+        """Files cleared to empty in source should be removed from the data repo."""
+        sync_instances(instances_dir, data_repo, push=False)
+        assert (data_repo / "alpha" / "dreams.md").exists()
+
+        # Clear the source file (e.g. removed individual reflection)
+        (instances_dir / "alpha" / "memory" / "dreams.md").write_text("")
+        changed = sync_instances(instances_dir, data_repo, push=False)
+
+        assert changed is True
+        assert not (data_repo / "alpha" / "dreams.md").exists()
+
+    def test_empty_parent_dirs_cleaned_up(self, tmp_path, data_repo):
+        """When all files in a subdirectory are removed, the directory is cleaned up."""
+        inst = tmp_path / "instances"
+        mem = inst / "alpha" / "memory"
+        (mem / "reflections").mkdir(parents=True)
+        (mem / "reflections" / "alice.md").write_text("Alice reflects.")
+        (mem / "thinking.md").write_text("thoughts")
+
+        sync_instances(inst, data_repo, push=False)
+        assert (data_repo / "alpha" / "reflections" / "alice.md").exists()
+
+        # Clear the reflection (simulating archive_removed_individual)
+        (mem / "reflections" / "alice.md").write_text("")
+        sync_instances(inst, data_repo, push=False)
+
+        assert not (data_repo / "alpha" / "reflections" / "alice.md").exists()
+        assert not (data_repo / "alpha" / "reflections").exists()
+
+    def test_published_dir_not_cleaned(self, tmp_path, data_repo):
+        """_published/ files should not be removed during cleanup."""
+        inst = tmp_path / "instances"
+        mem = inst / "alpha" / "memory"
+        mem.mkdir(parents=True)
+        (mem / "thinking.md").write_text("thoughts")
+
+        sync_instances(inst, data_repo, push=False)
+
+        # Simulate publish.py writing a file to _published/
+        published_dir = data_repo / "alpha" / "_published"
+        published_dir.mkdir(parents=True)
+        (published_dir / "graph.html").write_text("<html>graph</html>")
+
+        # Sync again — _published/ should survive
+        sync_instances(inst, data_repo, push=False)
+        assert (published_dir / "graph.html").exists()
+
+    def test_index_md_not_cleaned(self, instances_dir, data_repo):
+        """Generated index.md files should not be removed during cleanup."""
+        sync_instances(instances_dir, data_repo, push=False)
+        assert (data_repo / "alpha" / "index.md").exists()
+
+        # Sync again — index.md should survive
+        sync_instances(instances_dir, data_repo, push=False)
+        assert (data_repo / "alpha" / "index.md").exists()
+
+    def test_thrivemind_individual_lifecycle(self, tmp_path, data_repo):
+        """Simulate Thrivemind removing an individual: reflection cleared, archived to removed/."""
+        inst = tmp_path / "instances"
+        mem = inst / "colony" / "memory"
+        (mem / "reflections").mkdir(parents=True)
+        (mem / "removed").mkdir(parents=True)
+        (mem / "reflections" / "alpha.md").write_text("Alpha reflects deeply.")
+        (mem / "reflections" / "beta.md").write_text("Beta contemplates.")
+        (mem / "thinking.md").write_text("Colony thoughts.")
+
+        sync_instances(inst, data_repo, push=False)
+        assert (data_repo / "colony" / "reflections" / "alpha.md").exists()
+        assert (data_repo / "colony" / "reflections" / "beta.md").exists()
+
+        # Alpha is removed: reflection cleared, data archived
+        (mem / "reflections" / "alpha.md").write_text("")
+        (mem / "removed" / "alpha.md").write_text("Alpha's final reflection.")
+
+        changed = sync_instances(inst, data_repo, push=False)
+        assert changed is True
+        # Alpha's reflection removed from data repo
+        assert not (data_repo / "colony" / "reflections" / "alpha.md").exists()
+        # Beta still present
+        assert (data_repo / "colony" / "reflections" / "beta.md").exists()
+        # Archived data present
+        assert (data_repo / "colony" / "removed" / "alpha.md").exists()
+        assert "final reflection" in (data_repo / "colony" / "removed" / "alpha.md").read_text()
+
+    def test_cleanup_with_prefix(self, tmp_path, data_repo):
+        """Cleanup works correctly when using a prefix."""
+        inst = tmp_path / "instances"
+        mem = inst / "alpha" / "memory"
+        mem.mkdir(parents=True)
+        (mem / "thinking.md").write_text("thoughts")
+        (mem / "old.md").write_text("old content")
+
+        sync_instances(inst, data_repo, prefix="project", push=False)
+        assert (data_repo / "project" / "alpha" / "old.md").exists()
+
+        # Remove the file
+        (mem / "old.md").unlink()
+        changed = sync_instances(inst, data_repo, prefix="project", push=False)
+
+        assert changed is True
+        assert not (data_repo / "project" / "alpha" / "old.md").exists()
+        assert (data_repo / "project" / "alpha" / "thinking.md").exists()
+
+
 class TestSyncKnowledgeAndArchive:
     def test_knowledge_subdir_synced(self, tmp_path, data_repo):
         """knowledge/ subfolders are included in sync."""

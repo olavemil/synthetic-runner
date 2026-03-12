@@ -231,6 +231,16 @@ def save_graph(ctx: InstanceContext, graph: SemanticGraph) -> None:
 
 # --- Tool schemas ---
 
+GRAPH_SCOPE_MAP: dict[str, frozenset[str]] = {
+    "graph_add_node":    frozenset(["graph-write"]),
+    "graph_add_edge":    frozenset(["graph-write"]),
+    "graph_remove_node": frozenset(["graph-write"]),
+    "graph_remove_edge": frozenset(["graph-write"]),
+    "graph_snapshot":    frozenset(["graph-write"]),
+    "graph_query":       frozenset(["graph-read"]),
+    "graph_describe":    frozenset(["graph-read"]),
+}
+
 GRAPH_TOOL_SCHEMAS = [
     {
         "type": "function",

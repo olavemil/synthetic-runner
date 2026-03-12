@@ -526,3 +526,164 @@ def render_map_gif(
     )
     out.seek(0)
     return out.read()
+
+
+# ---------------------------------------------------------------------------
+# Creations → Gallery HTML
+# ---------------------------------------------------------------------------
+
+_ABCJS_CDN = "https://cdn.jsdelivr.net/npm/abcjs@6/dist/abcjs-basic-min.js"
+
+_GALLERY_HTML_TEMPLATE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{title}</title>
+<script src="{abcjs_src}"></script>
+<style>
+  body {{ margin: 0; background: #1a1a2e; color: #e0e0e0; font-family: sans-serif; padding: 24px; }}
+  h1 {{ font-size: 20px; color: #e94560; margin: 0 0 8px; }}
+  .subtitle {{ font-size: 13px; color: #888; margin-bottom: 24px; }}
+  .creation {{ background: #16213e; border: 1px solid #0f3460; border-radius: 6px;
+               padding: 16px; margin-bottom: 16px; }}
+  .creation h2 {{ font-size: 16px; color: #e94560; margin: 0 0 4px; }}
+  .creation .meta {{ font-size: 11px; color: #666; margin-bottom: 12px; }}
+  .creation .body {{ font-size: 14px; line-height: 1.6; }}
+  .creation .body p {{ margin: 0.5em 0; }}
+  .creation svg {{ max-width: 100%; height: auto; background: #0d1117; border-radius: 4px; padding: 8px; }}
+  .abc-render {{ background: #f8f8f8; border-radius: 4px; padding: 8px; }}
+  .game-link {{ display: inline-block; background: #0f3460; color: #e0e0e0; padding: 8px 16px;
+                border-radius: 4px; text-decoration: none; margin-top: 8px; }}
+  .game-link:hover {{ background: #e94560; }}
+  .type-badge {{ display: inline-block; background: #0f3460; color: #aaa; font-size: 10px;
+                 padding: 2px 6px; border-radius: 3px; margin-left: 8px; text-transform: uppercase; }}
+</style>
+</head>
+<body>
+<h1>{title}</h1>
+<div class="subtitle">{subtitle}</div>
+{entries}
+<script>
+document.querySelectorAll('.abc-source').forEach(function(el) {{
+  var target = el.nextElementSibling;
+  if (typeof ABCJS !== 'undefined' && target) {{
+    ABCJS.renderAbc(target, el.textContent.trim());
+  }}
+}});
+</script>
+</body>
+</html>
+"""
+
+
+def _simple_md_to_html(text: str) -> str:
+    """Minimal markdown-to-HTML for rendering narrative/poetry in the gallery."""
+    lines = text.split("\n")
+    result = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            result.append("")
+            continue
+        # Headers
+        if stripped.startswith("### "):
+            result.append(f"<h4>{html.escape(stripped[4:])}</h4>")
+        elif stripped.startswith("## "):
+            result.append(f"<h3>{html.escape(stripped[3:])}</h3>")
+        elif stripped.startswith("# "):
+            result.append(f"<h2>{html.escape(stripped[2:])}</h2>")
+        else:
+            result.append(html.escape(stripped))
+
+    # Join and wrap non-heading lines in paragraphs
+    output = []
+    paragraph: list[str] = []
+    for line in result:
+        if line.startswith("<h"):
+            if paragraph:
+                output.append("<p>" + "<br>\n".join(paragraph) + "</p>")
+                paragraph = []
+            output.append(line)
+        elif line == "":
+            if paragraph:
+                output.append("<p>" + "<br>\n".join(paragraph) + "</p>")
+                paragraph = []
+        else:
+            paragraph.append(line)
+    if paragraph:
+        output.append("<p>" + "<br>\n".join(paragraph) + "</p>")
+
+    return "\n".join(output)
+
+
+def render_creations_gallery_html(
+    creations: list[dict],
+    title: str = "Creations",
+) -> str:
+    """Render a list of creations as a self-contained HTML gallery.
+
+    Args:
+        creations: List of dicts with keys: title, type, body, slug, updated.
+                   body is the raw content (SVG, markdown, ABC, or HTML).
+        title: Gallery page title.
+
+    Returns:
+        Self-contained HTML string.
+    """
+    entries_html = []
+
+    for c in creations:
+        c_type = c.get("type", "unknown")
+        c_title = html.escape(c.get("title", "Untitled"))
+        c_slug = html.escape(c.get("slug", ""))
+        c_updated = c.get("updated", "")
+        body = c.get("body", "")
+
+        meta_parts = [f'<span class="type-badge">{html.escape(c_type)}</span>']
+        if c_updated:
+            meta_parts.append(f'updated: {html.escape(str(c_updated))}')
+        meta_line = ' '.join(meta_parts)
+
+        if c_type == "art":
+            # SVG — inline directly (already sanitized on creation), plus link to raw file
+            body_html = (
+                body
+                + f'\n<p><a class="game-link" href="creations/{c_slug}.svg" target="_blank">'
+                f'View SVG</a></p>'
+            )
+        elif c_type in ("narrative", "poetry"):
+            body_html = _simple_md_to_html(body)
+        elif c_type == "music":
+            # ABC — hidden source + render target for abcjs
+            escaped_abc = html.escape(body)
+            body_html = (
+                f'<pre class="abc-source" style="display:none">{escaped_abc}</pre>\n'
+                f'<div class="abc-render"></div>'
+            )
+        elif c_type == "game":
+            # HTML game — published as individual file, link to it
+            body_html = (
+                f'<a class="game-link" href="creations/{c_slug}.html" target="_blank">'
+                f'Open interactive experience</a>'
+            )
+        else:
+            body_html = f"<pre>{html.escape(body[:2000])}</pre>"
+
+        entry = (
+            f'<div class="creation">\n'
+            f'  <h2>{c_title}</h2>\n'
+            f'  <div class="meta">{meta_line}</div>\n'
+            f'  <div class="body">{body_html}</div>\n'
+            f'</div>'
+        )
+        entries_html.append(entry)
+
+    subtitle = f"{len(creations)} work{'s' if len(creations) != 1 else ''}"
+
+    return _GALLERY_HTML_TEMPLATE.format(
+        title=html.escape(title),
+        subtitle=html.escape(subtitle),
+        abcjs_src=_ABCJS_CDN,
+        entries="\n".join(entries_html),
+    )

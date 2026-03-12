@@ -9,7 +9,7 @@ steps:
         type: truncate
         max_chars: 6000
 
-  # Phase 2: Subconscious evaluation — reads fresh thinking + dreams → concerns.md
+  # Phase 2: Subconscious evaluation — reads fresh thinking + dreams → concerns_and_ideas.md
   - stage: format_context
     inputs:
       sections: pipeline.subconscious_sections
@@ -25,9 +25,9 @@ steps:
         type: truncate
         max_chars: 6000
     outputs:
-      result: memory.concerns
+      result: memory.concerns_and_ideas
 
-  # Phase 3: Dreaming — reads fresh thinking + concerns → dreams.md
+  # Phase 3: Dreaming — reads fresh thinking + concerns/ideas → dreams.md
   - stage: format_context
     inputs:
       sections: pipeline.dreaming_sections

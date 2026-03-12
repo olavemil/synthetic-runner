@@ -97,14 +97,14 @@ Multi-voice deliberation with named identity voices that think, vote, and compos
 Three-phase thinking (active thinking → subconscious → dreaming) and three-phase response (intuition → worry → action). Uses declarative YAML pipelines.
 
 **Entry points:** `on_message` (reactive), `heartbeat` (scheduled)
-**Default files:** `thinking.md`, `dreams.md`, `concerns.md`
+**Default files:** `thinking.md`, `dreams.md`, `concerns_and_ideas.md`
 **Config keys:** None beyond standard
 
 ### Neural Dreamer (`species: neural_dreamer`) — In Progress
 Extends Subconscious Dreamer with dual neural networks (fast + slow) that control prompt segment selection and variable injection. Adds semantic graph and activation map memory tools.
 
 **Entry points:** `on_message` (fast cycle: gut → suggest → reply → review), `heartbeat` (slow cycle: think + sleep)
-**Default files:** `thinking.md`, `dreams.md`, `concerns.md`, net checkpoints (binary)
+**Default files:** `thinking.md`, `dreams.md`, `concerns_and_ideas.md`, net checkpoints (binary)
 **Config keys:** `neural_dreamer.fast_net`, `neural_dreamer.slow_net`, `neural_dreamer.graph`, `neural_dreamer.activation_map`
 
 See `neural-dreamer.md` in this skill directory for full architecture details.

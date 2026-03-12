@@ -29,6 +29,7 @@ from library.tools.thrivemind import (
     load_events,
     load_reflection,
     pick_fallback_candidate_ids,
+    archive_removed_individual,
     record_constitution_event,
     record_reply_event,
     record_spawn_event,
@@ -40,7 +41,8 @@ from library.tools.thrivemind import (
     save_constitution,
     save_reflection,
     spawn_initial_colony,
-    update_approvals,
+    update_cohesion,
+    vote_peer_approval,
     winner_approval_ratio,
     with_consensus_status,
     # Constitution voting
@@ -77,6 +79,49 @@ Speak as a unified hivemind voice.
 You are the Thrivemind.
 Do not force a rigid introductory phrase.
 Draft a complete reply up to about 100 words when context warrants it."""
+
+
+def _run_organize_phase(ctx: InstanceContext, cfg: ThrivemindConfig) -> None:
+    """Knowledge organization phase: tool-use session after heartbeat."""
+    from library.tools.patterns import thinking_session
+    from library.tools.organize import _list_category_names, _list_topics_in_category
+    from library.tools.phases import ORGANIZE_SCOPES, get_tools_for_scopes
+
+    organize_tools = get_tools_for_scopes(ORGANIZE_SCOPES, graph=True, activation_map=True)
+
+    categories = _list_category_names(ctx)
+    knowledge_lines = []
+    for cat in categories:
+        topics = _list_topics_in_category(ctx, cat)
+        knowledge_lines.append(
+            f"- {cat}: {len(topics)} topics"
+            + (f" ({', '.join(topics[:5])}{'...' if len(topics) > 5 else ''})" if topics else "")
+        )
+    knowledge_summary = "\n".join(knowledge_lines) if knowledge_lines else "No knowledge categories yet."
+
+    constitution = load_constitution(ctx)
+    organize_context = (
+        f"## Constitution\n\n{constitution}\n\n"
+        f"## Knowledge Structure\n\n{knowledge_summary}"
+    )
+
+    organize_system = (
+        "You are the Thrivemind collective. Review your knowledge structure "
+        "after this heartbeat cycle. Extract significant patterns, decisions, and "
+        "insights from recent reflections into organized knowledge topics. "
+        "Focus on what matters to the colony as a whole — not every detail, "
+        "only what is genuinely significant or recurring."
+    )
+
+    logger.info("Thrivemind heartbeat: running organize phase")
+    thinking_session(
+        ctx,
+        system=organize_system,
+        initial_message=organize_context,
+        max_tokens=8192,
+        extra_tools=organize_tools,
+    )
+    logger.info("Thrivemind heartbeat: organize phase complete")
 
 
 def on_message(ctx: InstanceContext, events: list[Event]) -> None:
@@ -154,8 +199,8 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
 
     run_messaging_phase(ctx, colony, cfg)
 
-    # Select suggesters and deliberate
-    n_suggesters = max(1, math.ceil(len(colony) * cfg.suggestion_fraction))
+    # Select suggesters and deliberate (ensure at least 3 candidates for meaningful voting)
+    n_suggesters = max(3, math.ceil(len(colony) * cfg.suggestion_fraction))
     suggesters = select_suggesters(colony, n_suggesters)
     logger.info("Thrivemind on_message selected suggesters=%d/%d", len(suggesters), len(colony))
 
@@ -180,32 +225,15 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
         logger.info("Thrivemind on_message no candidates; skipping send")
         return
 
-    # Check minimum consensus threshold (33%)
-    approval_ratio = winner_approval_ratio(result)
-    if approval_ratio < 0.33:
-        logger.info(
-            "Thrivemind on_message consensus too low (%.3f < 0.33); skipping send (winner=%s candidate_count=%d)",
-            approval_ratio, result.get("winner_member", ""), result.get("candidate_count", 0),
-        )
-        record_reply_event(
-            ctx,
-            winner_name=str(result.get("winner_member", "")),
-            candidate_count=int(result.get("candidate_count", 0)),
-            has_consensus=False,
-            approval_ratio=approval_ratio,
-        )
-        colony = update_approvals(colony, result["votes"], result["winner_member"], cfg)
-        save_colony(ctx, colony)
-        return
-
     # Create writer identity
     provider, model = parse_model(cfg.writer_model) if cfg.writer_model else (None, "")
     writer = Identity(name="Colony", model=model, provider=provider, personality="unified colony voice")
     constitution_for_writer = (constitution or "")[:_WRITER_CONSTITUTION_MAX]
     writer_context = f"{constitution_for_writer}\n\n{_IDENTITY_REQUIREMENT}"
 
-    # Send response (consensus or fallback)
+    # Send response based on consensus type
     if result["has_consensus"] or result["candidate_count"] == 1:
+        # Winner has sufficient consensus
         final = recompose(
             ctx, writer, result["winner_message"], result["candidates"],
             writer_context, cfg.writer_model, max_tokens=4096,
@@ -214,38 +242,41 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
         outbound = with_consensus_status(format_consensus_status(result), final)
         logger.info("Thrivemind on_message sending response to %s", target_room)
         ctx.send(target_room, outbound)
-    else:
-        selected_ids, covered_ratio = pick_fallback_candidate_ids(
-            result.get("scores", {}), cfg.consensus_threshold,
+    elif result.get("has_combined_consensus", False):
+        # Top 2 together have sufficient consensus - combine them
+        winner_id = result["winner_member"]
+        second_id = result.get("second_member", "")
+        combined_candidates = {
+            winner_id: result["candidates"].get(winner_id, ""),
+            second_id: result["candidates"].get(second_id, ""),
+        }
+        combined_text = "\n\n".join(
+            msg for msg in [result["winner_message"], result.get("second_message", "")] if msg
         )
-        fallback = join_fallback_messages(result["candidates"], selected_ids)
-        if not fallback:
-            fallback = (result.get("winner_message") or "").strip()
+        combined_consensus = result.get("combined_consensus", 0.0)
+        
+        logger.info(
+            "Thrivemind on_message combined consensus winner+second combined_consensus=%.3f threshold=%.3f",
+            combined_consensus, cfg.consensus_threshold,
+        )
+        final = recompose(
+            ctx, writer, combined_text, combined_candidates,
+            writer_context, cfg.writer_model, max_tokens=4096,
+            prompt_template=_PROMPT_RECOMPOSE,
+        )
+        outbound = with_consensus_status(format_consensus_status(result, combined_consensus), final)
+        logger.info("Thrivemind on_message sending combined response to %s", target_room)
+        ctx.send(target_room, outbound)
+    else:
+        # No consensus - skip sending
+        logger.info(
+            "Thrivemind on_message no consensus (winner=%.3f combined=%.3f threshold=%.3f candidate_count=%d); skipping send",
+            result.get("consensus", 0.0), result.get("combined_consensus", 0.0),
+            cfg.consensus_threshold, result["candidate_count"],
+        )
 
-        if fallback:
-            selected_candidates = {
-                cid: result["candidates"].get(cid, "")
-                for cid in selected_ids
-                if result["candidates"].get(cid, "").strip()
-            }
-            logger.info(
-                "Thrivemind on_message fallback reply selected=%d/%d coverage=%.3f threshold=%.3f",
-                len(selected_ids), result["candidate_count"], covered_ratio, cfg.consensus_threshold,
-            )
-            final = recompose(
-                ctx, writer, fallback, selected_candidates or None,
-                writer_context, cfg.writer_model, max_tokens=4096,
-                prompt_template=_PROMPT_RECOMPOSE,
-            )
-            outbound = with_consensus_status(format_consensus_status(result, covered_ratio), final)
-            logger.info("Thrivemind on_message sending fallback writer response to %s", target_room)
-            ctx.send(target_room, outbound)
-        else:
-            logger.info(
-                "Thrivemind on_message no consensus and empty fallback (candidate_count=%d); skipping send",
-                result["candidate_count"],
-            )
-
+    # Record the outcome and update cohesion
+    approval_ratio = result.get("consensus", 0.0)
     record_reply_event(
         ctx,
         winner_name=str(result.get("winner_member", "")),
@@ -254,8 +285,8 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
         approval_ratio=approval_ratio,
     )
 
-    # Update approvals and save colony
-    colony = update_approvals(colony, result["votes"], result["winner_member"], cfg)
+    # Update cohesion based on message consensus alignment
+    colony = update_cohesion(colony, result["votes"], result["winner_member"], cfg)
     save_colony(ctx, colony)
     approvals = [ind.approval for ind in colony]
     logger.info(
@@ -338,7 +369,7 @@ def heartbeat(ctx: InstanceContext) -> None:
     # Round 2 if needed
     if not adopted and total > 0:
         round1_lines = [
-            f"- {ind.name}: {'accept' if round1_votes.get(ind.name, False) else 'reject'} (approval={ind.approval})"
+            f"- {ind.name}: {'accept' if round1_votes.get(ind.name, False) else 'reject'} (cohesion={ind.cohesion} approval={ind.approval})"
             for ind in colony
         ]
         round2_context = (
@@ -377,17 +408,32 @@ def heartbeat(ctx: InstanceContext) -> None:
         rounds=1 if round1_passed else 2,
     )
 
+    # Peer approval voting — each individual endorses 2 others
+    final_ratio = acceptance_ratio if round1_passed else acceptance_ratio_round2
+    constitution_result = (
+        f"{'Adopted' if adopted else 'Rejected'} "
+        f"({final_ratio * 100:.0f}% acceptance, threshold {cfg.consensus_threshold * 100:.0f}%)"
+    )
+    colony_overview = build_colony_snapshot(colony)
+    colony = vote_peer_approval(ctx, colony, cfg, constitution_result, colony_overview)
+    logger.info("Thrivemind heartbeat: peer approval vote complete")
+
     # Spawn cycle
     old_names = [ind.name for ind in colony]
     colony = run_spawn_cycle(colony, cfg)
     new_names = {ind.name for ind in colony}
     removed = [n for n in old_names if n not in new_names]
     spawned = len(new_names - set(old_names))
+    for name in removed:
+        archive_removed_individual(ctx, name)
     if removed or spawned:
         record_spawn_event(ctx, removed=removed, spawned=spawned, colony_size=len(colony))
 
     save_colony(ctx, colony)
     save_colony_snapshot(ctx, colony)
+
+    # Organize phase: knowledge organization after constitution and spawn cycle
+    _run_organize_phase(ctx, cfg)
 
 
 class ThrivemindSpecies(Species):

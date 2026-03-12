@@ -273,4 +273,8 @@ def handle_tool(ctx: InstanceContext, name: str, arguments: dict) -> tuple[str, 
         from library.tools.organize import handle_organize_tool
         return handle_organize_tool(ctx, name, arguments), False
 
+    if name.startswith("creative_"):
+        from library.tools.creative import handle_creative_tool
+        return handle_creative_tool(ctx, name, arguments), False
+
     return f"Unknown tool: {name}", False

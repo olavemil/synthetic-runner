@@ -224,6 +224,16 @@ def save_map(ctx: InstanceContext, m: ActivationMap) -> None:
 
 # --- Tool schemas ---
 
+MAP_SCOPE_MAP: dict[str, frozenset[str]] = {
+    "map_define":     frozenset(["map-write"]),
+    "map_set":        frozenset(["map-write"]),
+    "map_set_region": frozenset(["map-write"]),
+    "map_clear":      frozenset(["map-write"]),
+    "map_snapshot":   frozenset(["map-write"]),
+    "map_get":        frozenset(["map-read"]),
+    "map_describe":   frozenset(["map-read"]),
+}
+
 MAP_TOOL_SCHEMAS = [
     {
         "type": "function",

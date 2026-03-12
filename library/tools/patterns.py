@@ -14,6 +14,7 @@ from library.tools.prompts import (
     format_memory_context,
     format_intentions_block,
     format_subconscious_block,
+    STANDARD_MEMORY_FILES,
 )
 from library.tools.tools import make_tools, handle_tool
 
@@ -326,16 +327,43 @@ topics of interest, and anything noteworthy. Keep it concise."""
             ctx.write(rel_path, response.message.strip())
 
 
-def distill_memory(ctx: InstanceContext, exclude: list[str] | None = None) -> str:
-    """Recursive memory compression. Returns a digest string."""
+def distill_memory(
+    ctx: InstanceContext,
+    exclude: list[str] | None = None,
+    include: list[str] | None = None,
+) -> str:
+    """Recursive memory compression. Returns a digest string.
+    
+    Args:
+        ctx: Instance context
+        exclude: Files to exclude from distillation
+        include: Files/folders to include (defaults to STANDARD_MEMORY_FILES).
+                 Entries ending with '/' are treated as folders and traversed.
+    """
+    blacklist = ["knowledge/", "inbox/"]
     exclude = exclude or []
-    memory = read_memory(ctx)
+    include = include or STANDARD_MEMORY_FILES
+
+    # Expand folders in include list
+    files_to_process = []
+    for entry in include:
+        if entry.endswith("/"):
+            # It's a folder - list all files in it
+            folder_files = ctx.list(entry)
+            files_to_process.extend(folder_files)
+        else:
+            files_to_process.append(entry)
 
     parts = []
-    for fname, content in sorted(memory.items()):
-        if fname in exclude or not content:
+    for fname in sorted(set(files_to_process)):
+        if fname in exclude:
             continue
-        parts.append(f"## {fname}\n{content}")
+        # Check if fname starts with any blacklisted folder
+        if any(fname.startswith(folder) for folder in blacklist):
+            continue
+        content = ctx.read(fname)
+        if content and content.strip():
+            parts.append(f"## {fname}\n{content}")
 
     if not parts:
         return ""

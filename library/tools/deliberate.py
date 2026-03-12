@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from library.harness.sanitize import strip_think_blocks
 from library.tools.identity import Identity, format_persona, parse_model
-from library.tools.voting import borda_tally
+from library.tools.voting import borda_tally, approval_tally
 
 if TYPE_CHECKING:
     from library.harness.context import InstanceContext
@@ -102,7 +102,7 @@ def multi_generate(
     return outputs
 
 
-def _generate_ranking(
+def _generate_approval(
     ctx: InstanceContext,
     voter: Identity,
     candidates: dict[str, str],
@@ -110,16 +110,17 @@ def _generate_ranking(
     model: str = "",
     vote_context: str = "",
 ) -> list[str]:
-    """Ask a voter to rank candidates. Returns ordered list of candidate names."""
+    """Ask a voter to approve exactly 2 candidates. Returns list of approved candidate ids."""
     candidate_ids = list(candidates.keys())
-    if len(candidates) == 1:
+    if len(candidates) <= 2:
+        # If 2 or fewer candidates, approve all
         return candidate_ids
 
     persona = format_persona(voter)
     options = "\n".join(f"- {cid}: {text}" for cid, text in candidates.items())
     system = (
         f"You are {voter.name}. Personality: {persona}\n"
-        "Rank the candidate replies by how well they address the conversation."
+        "Select exactly 2 candidates whose replies best address the conversation."
     )
     truncated_context = vote_context[-_VOTE_CONTEXT_MAX_CHARS:] if vote_context else ""
     context_block = f"\nShared context:\n{truncated_context}\n\n" if truncated_context else ""
@@ -127,7 +128,7 @@ def _generate_ranking(
         f"Conversation:\n{prompt}\n\n"
         f"{context_block}"
         f"Candidates:\n{options}\n\n"
-        f'Return JSON: {{"ranking": ["id1", "id2", ...]}}'
+        f'Return JSON: {{"approved": ["id1", "id2"]}}'
     )
 
     # Resolve model/provider
@@ -174,15 +175,16 @@ def _generate_ranking(
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
         data = json.loads(raw)
-        ranking = [str(r) for r in data.get("ranking", [])]
+        approved = [str(a) for a in data.get("approved", [])]
     except Exception:
-        ranking = []
+        approved = []
 
-    # Normalize: ensure all candidate ids present
-    normalized = [cid for cid in ranking if cid in candidate_ids]
-    for cid in candidate_ids:
-        if cid not in normalized:
-            normalized.append(cid)
+    # Normalize: ensure exactly 2 valid candidates, pick first 2 if more, fill with remaining if fewer
+    normalized = [cid for cid in approved if cid in candidate_ids][:2]
+    if len(normalized) < 2:
+        remaining = [cid for cid in candidate_ids if cid not in normalized]
+        normalized.extend(remaining[: 2 - len(normalized)])
+    
     return normalized
 
 
@@ -197,10 +199,10 @@ def multi_vote(
     vote_context: str = "",
     vote_context_by_identity: dict[str, str] | None = None,
 ) -> dict[str, list[str]]:
-    """Have each identity rank candidates. Returns {voter.name → ranked candidate names}.
+    """Have each identity approve exactly 2 candidates. Returns {voter.name → approved candidate ids}.
 
-    exclude_own=True: voter's own name is excluded from candidates they rank.
-    top_n>0: truncate each ranking to top_n items.
+    exclude_own=True: voter's own name is excluded from candidates they can approve.
+    top_n: (deprecated, ignored - always returns exactly 2 approvals)
     """
     votes: dict[str, list[str]] = {}
     for voter in identities:
@@ -213,15 +215,15 @@ def multi_vote(
             votes[voter.name] = []
             continue
 
-        if len(voter_candidates) == 1:
-            ranking = list(voter_candidates.keys())
+        if len(voter_candidates) <= 2:
+            approved = list(voter_candidates.keys())
         else:
             use_vote_context = (
                 vote_context_by_identity.get(voter.name, vote_context)
                 if vote_context_by_identity
                 else vote_context
             )
-            ranking = _generate_ranking(
+            approved = _generate_approval(
                 ctx,
                 voter,
                 voter_candidates,
@@ -230,9 +232,7 @@ def multi_vote(
                 use_vote_context,
             )
 
-        if top_n > 0:
-            ranking = ranking[:top_n]
-        votes[voter.name] = ranking
+        votes[voter.name] = approved
 
     return votes
 
@@ -251,11 +251,15 @@ def deliberate(
     vote_context: str = "",
     vote_context_by_identity: dict[str, str] | None = None,
 ) -> dict:
-    """Full deliberation: generate candidates, vote, tally.
+    """Full deliberation: generate candidates, vote, tally using approval voting.
+
+    Each voter approves exactly 2 candidates (or all if fewer than 3).
+    Winner needs consensus (votes/voters) > consensus_threshold.
+    If winner alone insufficient but top 2 combined > threshold, enters fallback combining mode.
 
     subset: identities who generate candidates (None = all identities).
     Returns: winner_member, winner_message, scores, candidate_count, vote_count,
-             is_tie, has_consensus, candidates dict, votes dict.
+             is_tie, has_consensus, has_combined_consensus, candidates dict, votes dict.
     """
     generators = subset if subset is not None else identities
     candidates = multi_generate(ctx, generators, prompt, context, model, context_by_identity)
@@ -269,6 +273,7 @@ def deliberate(
             "vote_count": 0,
             "is_tie": False,
             "has_consensus": False,
+            "has_combined_consensus": False,
             "candidates": {},
             "votes": {},
         }
@@ -284,21 +289,21 @@ def deliberate(
         vote_context,
         vote_context_by_identity,
     )
-    tally = borda_tally(candidates, votes)
-
-    winner_id = tally["winner_member"]
-    total_score = sum(tally["scores"].values())
-    winner_score = tally["scores"].get(winner_id, 0)
-    has_consensus = total_score == 0 or (winner_score / total_score) > consensus_threshold
+    tally = approval_tally(candidates, votes, consensus_threshold)
 
     return {
-        "winner_member": winner_id,
+        "winner_member": tally["winner_member"],
         "winner_message": tally["winner_message"],
+        "second_member": tally.get("second_member", ""),
+        "second_message": tally.get("second_message", ""),
         "scores": tally["scores"],
         "candidate_count": tally["candidate_count"],
         "vote_count": tally["vote_count"],
         "is_tie": tally["is_tie"],
-        "has_consensus": has_consensus,
+        "consensus": tally["consensus"],
+        "combined_consensus": tally.get("combined_consensus", 0.0),
+        "has_consensus": tally["has_consensus"],
+        "has_combined_consensus": tally.get("has_combined_consensus", False),
         "candidates": candidates,
         "votes": votes,
     }
@@ -382,7 +387,11 @@ def think_with_context(
 
     others_block = ""
     if others_thinking:
-        lines = [f"**{name}**: {thought}" for name, thought in others_thinking.items()]
+        # Randomize order to prevent precedence bias
+        import random
+        names = list(others_thinking.keys())
+        random.shuffle(names)
+        lines = [f"**{name}**: {others_thinking[name]}" for name in names]
         others_block = (
             "\n\n## Other voices' thoughts (not yours)\n"
             "Treat these as advisory input from the other voices.\n\n"
@@ -396,6 +405,7 @@ def think_with_context(
         "- Treat 'Other voices' content as someone else's perspective, not your own memory.\n"
         "- Think from your own perspective while coordinating with the other voices.\n"
         f"{others_block}\n\n"
-        "Write your current thoughts for this iteration."
+        f"Write your current thoughts for this iteration. Start with '**{identity.name}'s Current Thoughts**' "
+        f"and end with '*— {identity.name}*' so others know who is speaking."
     )
     return generate_with_identity(ctx, identity, prompt, full_context, "")

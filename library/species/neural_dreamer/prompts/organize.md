@@ -15,7 +15,6 @@ Available tools:
 - **organize_read_topic** — read a topic's content
 - **organize_write_topic** — create or update a topic (auto-creates category if needed)
 - **organize_remove_topic** — remove a topic
-- **organize_archive_thoughts** — move old thinking entries to the archive
 - **graph_add_node / graph_add_edge** — update your semantic graph to reflect knowledge structure
 - **done** — when you're finished
 

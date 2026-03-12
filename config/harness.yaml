@@ -3,7 +3,7 @@ providers:
   type: openai_compat
   base_url: ${LMSTUDIO_BASE_URL}
   api_key: lm-studio
-  max_concurrency: 2
+  max_concurrency: 1
 - id: anthropic
   type: anthropic
   api_key: ${ANTHROPIC_API_KEY}

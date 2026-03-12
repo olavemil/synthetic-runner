@@ -105,6 +105,8 @@ class InstanceContext:
         max_tokens: int = 4096,
         caller: str = "?",
     ) -> LLMResponse:
+        from library.harness.response_validator import is_response_pathological
+
         # Compatibility: toolkit helpers may pass a provider hint.
         # InstanceContext currently routes to the instance's configured provider.
         configured_provider = self._instance_config.provider
@@ -117,15 +119,49 @@ class InstanceContext:
                 self._instance_id,
                 configured_provider,
             )
-        return self._provider.create(
-            model=model or self._default_model,
-            messages=messages,
-            system=system,
-            tools=tools,
-            tool_choice=tool_choice,
-            max_tokens=max_tokens,
-            caller=caller,
-        )
+
+        # Retry up to 3 times if response is pathological
+        for attempt in range(1, 4):
+            response = self._provider.create(
+                model=model or self._default_model,
+                messages=messages,
+                system=system,
+                tools=tools,
+                tool_choice=tool_choice,
+                max_tokens=max_tokens,
+                caller=caller,
+            )
+
+            # Validate response message if no tool calls (tool outputs are trusted)
+            if not response.tool_calls:
+                is_bad, reason = is_response_pathological(response.message)
+                if is_bad:
+                    rejection_note = f" (attempt {attempt}/3: last output rejected — {reason})"
+                    if attempt < 3:
+                        # Add rejection context for retry
+                        messages = [*messages, {
+                            "role": "assistant",
+                            "content": response.message,
+                        }, {
+                            "role": "user",
+                            "content": f"That response was rejected due to: {reason}. Please regenerate.{rejection_note}",
+                        }]
+                        logger.info(
+                            "[%s] Response rejected (attempt %d/3): %s — retrying",
+                            caller, attempt, reason,
+                        )
+                        continue
+                    else:
+                        logger.warning(
+                            "[%s] Response rejected after 3 attempts: %s — returning last attempt",
+                            caller, reason,
+                        )
+
+            # Response is good or we're out of retries
+            return response
+
+        # Should not reach here
+        return response
 
     # --- Messaging ---
 
@@ -143,6 +179,42 @@ class InstanceContext:
                 f"Known spaces: {known_spaces}"
             )
         return handle
+
+    def can_send_reply(self) -> bool:
+        """Check if enough thinks have occurred since last reply to allow sending.
+
+        Returns True if min_thinks_per_reply is satisfied or not configured.
+        """
+        min_thinks = self._instance_config.schedule.get("min_thinks_per_reply")
+        if min_thinks is None:
+            return True  # No throttling configured
+        
+        try:
+            min_thinks = int(min_thinks)
+        except (ValueError, TypeError):
+            return True  # Invalid config, allow sending
+        
+        from library.harness.store import NamespacedStore
+        store = NamespacedStore(self._store_db, "checker")
+        thinks_key = f"thinks_since_reply:{self._instance_id}"
+        thinks_count = store.get(thinks_key) or 0
+        
+        if thinks_count < min_thinks:
+            logger.info(
+                "Instance '%s' throttled (thinks=%d < min=%d); skipping send",
+                self._instance_id, thinks_count, min_thinks,
+            )
+            return False
+        
+        return True
+
+    def _reset_thinks_counter(self) -> None:
+        """Reset thinks_since_reply counter after sending a message."""
+        from library.harness.store import NamespacedStore
+        store = NamespacedStore(self._store_db, "checker")
+        thinks_key = f"thinks_since_reply:{self._instance_id}"
+        store.put(thinks_key, 0)
+        logger.debug("Reset thinks_since_reply for %s", self._instance_id)
 
     def send(self, space: str, message: str, reply_to: str | None = None) -> str:
         if self._adapter is None:
@@ -178,6 +250,10 @@ class InstanceContext:
             resolved_space = fallback_handle
         event_id = self._adapter.send(resolved_space, message, reply_to)
         self._send_count += 1
+        
+        # Reset thinks counter after successful send
+        self._reset_thinks_counter()
+        
         return event_id
 
     def poll(self, space: str, since_token: str | None = None) -> tuple[list[Event], str]:

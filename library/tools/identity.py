@@ -33,6 +33,7 @@ class Identity:
     provider: str | None = None
     personality: str = ""
     dims: dict[str, float] | None = None
+    cohesion: float = 0.0  # for colonies, how closely aligned to the original spawn prompt
     approval: int = 0
     created_at: int = field(default_factory=lambda: int(time.time()))
     age: int = 0  # number of thinking sessions since spawn
@@ -99,6 +100,7 @@ def load_identity(raw: dict) -> Identity:
         provider=provider,
         personality=str(raw.get("personality", "")),
         dims=dims,
+        cohesion=float(raw.get("cohesion", 0.0)),
         approval=int(raw.get("approval", 0)),
         created_at=int(raw.get("created_at", int(time.time()))),
         age=int(raw.get("age", 0)),

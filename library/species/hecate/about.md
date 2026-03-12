@@ -11,6 +11,7 @@ Hecate is a three-voice deliberation species. Three named identity voices — ea
 | `{voice}_thinking.md` | Per-voice current thoughts (e.g. `aria_thinking.md`) |
 | `{voice}_subconscious.md` | Per-voice subconscious evaluation |
 | `{voice}_motivation.md` | Per-voice motivation notes |
+| `creations/` | Creative artifacts — art (.svg), narrative (.md), poetry (.md), music (.abc), game (.html) |
 
 ## on_message flow
 
@@ -53,6 +54,9 @@ heartbeat():
 
     write all thoughts to {voice}_thinking.md
     previous_thoughts = new_thoughts
+
+  organize  = knowledge management (tool-use session)
+  create    = open-ended creative expression (tool-use session)
 ```
 
 ## Config keys (`hecate:` block in instance YAML)

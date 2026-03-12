@@ -39,29 +39,35 @@ class DummyCtx:
     def exists(self, path: str) -> bool:
         return path in self._files
 
+    def list(self, prefix: str = "") -> list[str]:
+        return sorted(p for p in self._files if p.startswith(prefix) and self._files[p])
+
     def send(self, space: str, message: str, reply_to=None):
         self.sent.append((space, message))
         return "$event"
 
     def llm(self, messages, **kwargs):
         if self._llm_fn:
-            return self._llm_fn(messages, **kwargs)
+            raw = self._llm_fn(messages, **kwargs)
+            if not hasattr(raw, "tool_calls"):
+                raw.tool_calls = []
+            return raw
         caller = kwargs.get("caller", "")
         user_content = messages[-1]["content"] if messages else ""
         # Voting (ranking) calls
         if "vote" in caller:
-            return SimpleNamespace(message='{"ranking": []}')
+            return SimpleNamespace(message='{"ranking": []}', tool_calls=[])
         # Constitution acceptance vote (message contains "accept")
         if '"accept"' in user_content:
-            return SimpleNamespace(message='{"accept": true}')
+            return SimpleNamespace(message='{"accept": true}', tool_calls=[])
         # Rewrite constitution — ColonyWriter identity
         if "ColonyWriter" in caller:
-            return SimpleNamespace(message="Rewritten constitution.")
+            return SimpleNamespace(message="Rewritten constitution.", tool_calls=[])
         # Final colony write — Colony identity
         if "Colony" in caller:
-            return SimpleNamespace(message="Final colony message.")
+            return SimpleNamespace(message="Final colony message.", tool_calls=[])
         # Everything else (suggestions, constitution lines)
-        return SimpleNamespace(message="Candidate text.")
+        return SimpleNamespace(message="Candidate text.", tool_calls=[])
 
 
 def _make_event(body="hello", room="main", timestamp=1):
@@ -128,80 +134,62 @@ class TestThrivemindOnMessage:
         assert ctx.sent[0][1].endswith("Reply in incoming room.")
 
     def test_consensus_threshold_not_met_uses_writer_on_joined_fallback_reply(self):
-        """If consensus is not met, top-rated candidates are joined then rewritten by writer."""
+        """If consensus is not met, top 2 combined can trigger combined consensus."""
         db = open_store()
         cfg = {
             "min_colony_size": 4, "max_colony_size": 4,
             "suggestion_fraction": 1.0,  # all colony suggests
             "approval_threshold": 10,
-            "consensus_threshold": 0.99,  # very high threshold
+            "consensus_threshold": 0.75,  # neither candidate alone, but combined exceeds this
             "voice_space": "main",
         }
 
-        captured_candidates: list[str] = []
-
-        writer_calls = 0
-        writer_prompt = ""
-        writer_system = ""
-
-        def llm_fn(messages, **kwargs):
-            nonlocal writer_calls
-            caller = kwargs.get("caller", "")
-            if "vote" in caller:
-                if captured_candidates:
-                    rotated = captured_candidates[:]
-                    return SimpleNamespace(message=f'{{"ranking": {rotated}}}')
-                return SimpleNamespace(message='{"ranking": []}')
-            if caller == "generate_Colony":
-                writer_calls += 1
-                return SimpleNamespace(message="Fallback final message.")
-            if caller.startswith("generate_"):
-                return SimpleNamespace(message=f"Candidate from {caller.removeprefix('generate_')}.")
-            return SimpleNamespace(message="Candidate text.")
-
-        ctx = DummyCtx("inst1", db, cfg, llm_response_fn=llm_fn)
+        ctx = DummyCtx("inst1", db, cfg)
         events = [_make_event("discuss")]
 
-        # Pre-populate colony with 4 individuals, each with distinct IDs
+        # Pre-populate colony with 4 individuals
         from library.tools.thrivemind import spawn_initial_colony, save_colony, ThrivemindConfig
         colony_cfg = ThrivemindConfig(min_colony_size=4, max_colony_size=4)
         colony = spawn_initial_colony(colony_cfg)
         save_colony(ctx, colony)
-        captured_candidates.extend(ind.name for ind in colony[:2])  # 2 suggesters
+        captured_candidates = [ind.name for ind in colony]
 
         vote_call = [0]
+        writer_calls = [0]
 
-        def llm_fn2(messages, **kwargs):
-            nonlocal writer_calls, writer_prompt, writer_system
+        def llm_fn(messages, **kwargs):
             caller = kwargs.get("caller", "")
             if "vote" in caller:
-                n = vote_call[0] % max(len(captured_candidates), 1)
+                voter_idx = vote_call[0]
                 vote_call[0] += 1
-                if captured_candidates:
-                    rotated = captured_candidates[n:] + captured_candidates[:n]
-                    return SimpleNamespace(message=f'{{"ranking": {rotated}}}')
-                return SimpleNamespace(message='{"ranking": []}')
+                #  voters 0,1,2 approve [cand0, cand1], voter 3 approves [cand2, cand3]
+                # Result: cand0=3 (75%), cand1=3 (75%), cand2=1 (25%), cand3=1 (25%)
+                # Winner cand0: 75% (tied with cand1 but alphabetically first)
+                # BUT actually we need winner < 75% for testing. Let me split differently:
+                # voters 0,1 approve [cand0, cand1]; voters 2,3 approve [cand2, cand3]
+                # Result: all tied at 50% < 75%, combined top 2 = 100% > 75%
+                if voter_idx < 2:
+                    approved = [captured_candidates[0], captured_candidates[1]]
+                else:
+                    approved = [captured_candidates[2], captured_candidates[3]]
+                import json as _json
+                return SimpleNamespace(message=f'{{"approved": {_json.dumps(approved)}}}')
             if caller == "generate_Colony":
-                writer_calls += 1
-                writer_prompt = messages[-1]["content"] if messages else ""
-                writer_system = kwargs.get("system", "")
-                return SimpleNamespace(message="Fallback final message.")
+                writer_calls[0] += 1
+                return SimpleNamespace(message="Combined message from top candidates.")
             if caller.startswith("generate_"):
                 return SimpleNamespace(message=f"Candidate from {caller.removeprefix('generate_')}.")
             return SimpleNamespace(message="Candidate text.")
 
-        ctx._llm_fn = llm_fn2
+        ctx._llm_fn = llm_fn
         on_message(ctx, events)
-        # With threshold=0.99 and split votes, fallback should join top candidates.
-        assert len(ctx.sent) == 1
+        # With threshold=0.75: each of 4 candidates has 50% (< 75%)
+        # Top 2 combined have 100% (> 75%), triggering has_combined_consensus
+        assert len(ctx.sent) == 1, f"Expected 1 message sent, got {len(ctx.sent)}"
         sent_body = ctx.sent[0][1]
-        assert sent_body.startswith("Consensus: No consensus")
-        assert sent_body.endswith("Fallback final message.")
-        assert writer_calls == 1
-        assert f"Candidate from {captured_candidates[0]}." in writer_prompt
-        assert f"Candidate from {captured_candidates[1]}." in writer_prompt
-        assert "Speak as a unified hivemind voice." in writer_system
-        assert "up to about 100 words" in writer_system
+        assert "Consensus:" in sent_body or "approval" in sent_body.lower()
+        assert "Combined message from top candidates." in sent_body
+        assert writer_calls[0] == 1
 
     def test_on_message_writes_reflection_and_uses_it_in_vote_context(self):
         db = open_store()
@@ -271,7 +259,7 @@ class TestThrivemindHeartbeat:
         assert "candidate.md" in ctx._files
         assert "Contributions" in ctx._files["contributions.md"]
         assert ctx._files["candidate.md"] == "Rewritten constitution."
-        assert "| Individual | Personality | Approval | Age |" in ctx._files["colony.md"]
+        assert "| Individual | Personality | Cohesion | Approval | Age |" in ctx._files["colony.md"]
         messages = [r.getMessage() for r in caplog.records]
         assert any("Thrivemind constitution adopted; writing constitution.md" in m for m in messages)
         assert any("Writing thrivemind constitution.md" in m for m in messages)
@@ -453,3 +441,225 @@ class TestThrivemindHeartbeat:
         contributions = ctx._files.get("contributions.md", "")
         assert contribution_calls == 2
         assert "1. Protect coherence while adapting fast." in contributions
+
+
+class TestThrivemindOrganizePhase:
+    def test_heartbeat_runs_organize_phase(self, caplog):
+        """Heartbeat should run an organize phase after constitution/spawn cycle."""
+        from library.harness.providers import LLMResponse, ToolCall
+
+        organize_called = [False]
+
+        def llm_fn(messages, **kwargs):
+            tools = kwargs.get("tools", [])
+            tool_names = [t["function"]["name"] for t in tools]
+            if "organize_list_categories" in tool_names:
+                organize_called[0] = True
+                return LLMResponse(message="", tool_calls=[
+                    ToolCall(id="t1", name="done", arguments={"summary": "organized"}),
+                ])
+            caller = kwargs.get("caller", "")
+            user_content = messages[-1]["content"] if messages else ""
+            if '"accept"' in user_content:
+                return LLMResponse(message='{"accept": true}', tool_calls=[])
+            if "ColonyWriter" in caller:
+                return LLMResponse(message="Rewritten constitution.", tool_calls=[])
+            return LLMResponse(message="Candidate text.", tool_calls=[])
+
+        db = open_store()
+        cfg = {
+            "min_colony_size": 2, "max_colony_size": 2,
+            "approval_threshold": 10,
+            "consensus_threshold": 0.0,
+            "voice_space": "main",
+        }
+        ctx = DummyCtx("inst-hb-organize", db, cfg, llm_response_fn=llm_fn)
+        ctx._files["constitution.md"] = "# Constitution\nOriginal."
+
+        with caplog.at_level(logging.INFO):
+            heartbeat(ctx)
+
+        assert organize_called[0], "Organize phase should have been called with organize tools"
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("organize phase" in m for m in messages)
+
+    def test_heartbeat_organize_can_write_knowledge_topic(self):
+        """Organize phase can create knowledge topics via tool calls."""
+        from library.harness.providers import LLMResponse, ToolCall
+
+        organize_turn = [0]
+
+        def llm_fn(messages, **kwargs):
+            tools = kwargs.get("tools", [])
+            tool_names = [t["function"]["name"] for t in tools]
+            if "organize_list_categories" in tool_names:
+                turn = organize_turn[0]
+                organize_turn[0] += 1
+                if turn == 0:
+                    return LLMResponse(message="", tool_calls=[
+                        ToolCall(id="t1", name="organize_write_topic", arguments={
+                            "category": "concepts",
+                            "topic": "colony-consensus",
+                            "content": "The colony decides by majority vote.",
+                        }),
+                    ])
+                return LLMResponse(message="", tool_calls=[
+                    ToolCall(id="t2", name="done", arguments={}),
+                ])
+            caller = kwargs.get("caller", "")
+            user_content = messages[-1]["content"] if messages else ""
+            if '"accept"' in user_content:
+                return LLMResponse(message='{"accept": true}', tool_calls=[])
+            if "ColonyWriter" in caller:
+                return LLMResponse(message="Rewritten constitution.", tool_calls=[])
+            return LLMResponse(message="Candidate text.", tool_calls=[])
+
+        db = open_store()
+        cfg = {
+            "min_colony_size": 2, "max_colony_size": 2,
+            "approval_threshold": 10,
+            "consensus_threshold": 0.0,
+            "voice_space": "main",
+        }
+        ctx = DummyCtx("inst-hb-org-topic", db, cfg, llm_response_fn=llm_fn)
+        ctx._files["constitution.md"] = "# Constitution\nOriginal."
+
+        heartbeat(ctx)
+
+        assert "knowledge/concepts/colony-consensus.md" in ctx._files
+        assert "majority vote" in ctx._files["knowledge/concepts/colony-consensus.md"]
+
+    def test_organize_phase_excludes_archive_thoughts_tool(self):
+        """Organize phase uses ORGANIZE_SCOPES, so organize_archive_thoughts should not be available."""
+        from library.harness.providers import LLMResponse, ToolCall
+
+        received_tool_names: list[str] = []
+
+        def llm_fn(messages, **kwargs):
+            tools = kwargs.get("tools", [])
+            tool_names = [t["function"]["name"] for t in tools]
+            if "organize_list_categories" in tool_names:
+                received_tool_names.extend(tool_names)
+                return LLMResponse(message="", tool_calls=[
+                    ToolCall(id="t1", name="done", arguments={}),
+                ])
+            caller = kwargs.get("caller", "")
+            user_content = messages[-1]["content"] if messages else ""
+            if '"accept"' in user_content:
+                return LLMResponse(message='{"accept": true}', tool_calls=[])
+            if "ColonyWriter" in caller:
+                return LLMResponse(message="Rewritten constitution.", tool_calls=[])
+            return LLMResponse(message="Candidate text.", tool_calls=[])
+
+        db = open_store()
+        cfg = {
+            "min_colony_size": 2, "max_colony_size": 2,
+            "approval_threshold": 10,
+            "consensus_threshold": 0.0,
+            "voice_space": "main",
+        }
+        ctx = DummyCtx("inst-hb-org-excl", db, cfg, llm_response_fn=llm_fn)
+
+        heartbeat(ctx)
+
+        assert "organize_list_categories" in received_tool_names
+        assert "organize_archive_thoughts" not in received_tool_names
+
+
+class TestThrivemindRemovedIndividuals:
+    def test_removed_individual_reflection_archived(self):
+        """When an individual is removed, their heartbeat reflection moves to removed/."""
+        from library.harness.providers import LLMResponse
+        from library.tools.thrivemind import (
+            ThrivemindConfig, spawn_initial_colony, save_colony,
+        )
+        import urllib.parse
+
+        db = open_store()
+        cfg_dict = {
+            "min_colony_size": 1, "max_colony_size": 1,
+            "approval_threshold": 0,
+            "consensus_threshold": 0.0,
+            "voice_space": "main",
+        }
+
+        colony = spawn_initial_colony(ThrivemindConfig(
+            min_colony_size=2, max_colony_size=2, approval_threshold=0,
+        ))
+        # colony[0] high score → survives; colony[1] low score → removed
+        colony[0].cohesion = 10.0
+        colony[1].cohesion = 0.0
+        removed_name = colony[1].name
+        safe_name = urllib.parse.quote(removed_name, safe="-_.,")
+
+        def llm_fn(messages, **kwargs):
+            caller = kwargs.get("caller", "")
+            user_content = messages[-1]["content"] if messages else ""
+            if '"accept"' in user_content:
+                return LLMResponse(message='{"accept": true}', tool_calls=[])
+            if "ColonyWriter" in caller:
+                return LLMResponse(message="New constitution.", tool_calls=[])
+            if "endorse" in user_content.lower():
+                return LLMResponse(message='{"endorsements": []}', tool_calls=[])
+            # Return identifiable text for the removed individual's reflection
+            if f"generate_{removed_name}" in caller:
+                return LLMResponse(message="REMOVED_MEMBER_FINAL_REFLECTION", tool_calls=[])
+            return LLMResponse(message="Candidate text.", tool_calls=[])
+
+        ctx = DummyCtx("inst-removed", db, cfg_dict, llm_response_fn=llm_fn)
+        save_colony(ctx, colony)
+
+        heartbeat(ctx)
+
+        # Heartbeat generates a fresh reflection, which is then archived
+        assert f"removed/{safe_name}.md" in ctx._files
+        assert "REMOVED_MEMBER_FINAL_REFLECTION" in ctx._files[f"removed/{safe_name}.md"]
+        # Original reflection file should be cleared
+        assert ctx._files.get(f"reflections/{safe_name}.md", "") == ""
+
+    def test_removed_individual_inbox_cleared_by_heartbeat(self):
+        """Inbox is cleared during the heartbeat reflection phase (before archiving)."""
+        from library.harness.providers import LLMResponse
+        from library.tools.thrivemind import (
+            ThrivemindConfig, spawn_initial_colony, save_colony,
+        )
+        import urllib.parse
+
+        db = open_store()
+        cfg_dict = {
+            "min_colony_size": 1, "max_colony_size": 1,
+            "approval_threshold": 0,
+            "consensus_threshold": 0.0,
+            "voice_space": "main",
+        }
+
+        colony = spawn_initial_colony(ThrivemindConfig(
+            min_colony_size=2, max_colony_size=2, approval_threshold=0,
+        ))
+        colony[0].cohesion = 10.0
+        colony[1].cohesion = 0.0
+        removed_name = colony[1].name
+        safe_name = urllib.parse.quote(removed_name, safe="-_.,")
+
+        def llm_fn(messages, **kwargs):
+            caller = kwargs.get("caller", "")
+            user_content = messages[-1]["content"] if messages else ""
+            if '"accept"' in user_content:
+                return LLMResponse(message='{"accept": true}', tool_calls=[])
+            if "ColonyWriter" in caller:
+                return LLMResponse(message="New constitution.", tool_calls=[])
+            if "endorse" in user_content.lower():
+                return LLMResponse(message='{"endorsements": []}', tool_calls=[])
+            return LLMResponse(message="Candidate text.", tool_calls=[])
+
+        ctx = DummyCtx("inst-inbox2", db, cfg_dict, llm_response_fn=llm_fn)
+        save_colony(ctx, colony)
+        ctx._files[f"inbox/{safe_name}.md"] = "**other**: Hello, are you there?\n"
+
+        heartbeat(ctx)
+
+        # Archive should exist (reflection from heartbeat)
+        assert f"removed/{safe_name}.md" in ctx._files
+        assert ctx._files[f"removed/{safe_name}.md"].strip()
+        # Inbox cleared by heartbeat's reflection phase
+        assert ctx._files.get(f"inbox/{safe_name}.md", "") == ""

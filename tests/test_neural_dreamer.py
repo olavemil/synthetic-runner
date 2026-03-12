@@ -149,15 +149,29 @@ class TestNeuralDreamerHeartbeat:
         ctx = make_mock_ctx(files)
 
         responses = iter([
+            # distill_memory in think phase
+            LLMResponse(message="Compressed memory for thinking", tool_calls=[]),
             # thinking_session: append + done
             LLMResponse(message="", tool_calls=[
                 ToolCall(id="t1", name="append_thinking", arguments={"content": "new insight"}),
                 ToolCall(id="t2", name="done", arguments={"summary": "done thinking"}),
             ]),
-            # llm_generate for subconscious → concerns.md
+            # organize_session: done immediately
+            LLMResponse(message="", tool_calls=[
+                ToolCall(id="t3", name="done", arguments={}),
+            ]),
+            # llm_generate for subconscious → concerns_and_ideas.md
             LLMResponse(message="Unresolved tension about identity.", tool_calls=[]),
+            # distill_memory in dream phase  
+            LLMResponse(message="Compressed memory for dreaming", tool_calls=[]),
             # llm_generate for dreaming → dreams.md
             LLMResponse(message="Dream of the shifting graph\nNodes rearranging.", tool_calls=[]),
+            # distill_memory in create phase
+            LLMResponse(message="Compressed memory for creation", tool_calls=[]),
+            # create phase: done immediately
+            LLMResponse(message="", tool_calls=[
+                ToolCall(id="t4", name="done", arguments={}),
+            ]),
             # llm_generate for sleep → sleep.md
             LLMResponse(message="Session was coherent. I felt engaged.", tool_calls=[]),
         ])
@@ -169,8 +183,8 @@ class TestNeuralDreamerHeartbeat:
         assert "coherent" in files.get("sleep.md", "")
         # thinking.md should contain new insight
         assert "new insight" in files.get("thinking.md", "")
-        # concerns.md updated
-        assert "tension" in files.get("concerns.md", "")
+        # concerns_and_ideas.md updated
+        assert "tension" in files.get("concerns_and_ideas.md", "")
         # dreams.md updated
         assert "Dream of the" in files.get("dreams.md", "")
         # reviews.md cleared after sleep
@@ -187,13 +201,18 @@ class TestNeuralDreamerHeartbeat:
         ctx = make_mock_ctx(files)
 
         captured_tools = []
+        call_count = [0]
 
         def fake_llm(**kwargs):
+            call_count[0] += 1
             if kwargs.get("tools"):
                 captured_tools.extend(kwargs["tools"])
-            return LLMResponse(message="", tool_calls=[
-                ToolCall(id="t1", name="done", arguments={}),
-            ])
+            # tool-session phases return done; generate phases return text
+            if kwargs.get("tools"):
+                return LLMResponse(message="", tool_calls=[
+                    ToolCall(id=f"t{call_count[0]}", name="done", arguments={}),
+                ])
+            return LLMResponse(message="phase output", tool_calls=[])
 
         ctx.llm = MagicMock(side_effect=fake_llm)
         nd_mod.heartbeat(ctx)
@@ -214,18 +233,32 @@ class TestNeuralDreamerHeartbeat:
         ctx = make_mock_ctx(files)
 
         responses = iter([
+            # distill_memory in think phase
+            LLMResponse(message="Compressed memory", tool_calls=[]),
             # First LLM call: use graph tool
             LLMResponse(message="", tool_calls=[
                 ToolCall(id="t1", name="graph_add_node", arguments={"id": "trust", "label": "Trust"}),
             ]),
-            # Second LLM call: done
+            # Second LLM call: done (think)
             LLMResponse(message="", tool_calls=[
                 ToolCall(id="t2", name="done", arguments={}),
             ]),
-            # Subconscious phase → concerns.md
+            # Organize phase: done immediately
+            LLMResponse(message="", tool_calls=[
+                ToolCall(id="t3", name="done", arguments={}),
+            ]),
+            # Subconscious phase → concerns_and_ideas.md
             LLMResponse(message="Concern about trust.", tool_calls=[]),
+            # distill_memory in dream phase
+            LLMResponse(message="Compressed memory for dream", tool_calls=[]),
             # Dreaming phase → dreams.md
             LLMResponse(message="Dream of the trust node.", tool_calls=[]),
+            # distill_memory in create phase
+            LLMResponse(message="Compressed memory for create", tool_calls=[]),
+            # Create phase: done immediately
+            LLMResponse(message="", tool_calls=[
+                ToolCall(id="t4", name="done", arguments={}),
+            ]),
             # Sleep phase
             LLMResponse(message="sleep output", tool_calls=[]),
         ])
@@ -259,6 +292,8 @@ class TestNeuralDreamerOnMessage:
         ctx = make_mock_ctx(files)
 
         responses = iter([
+            LLMResponse(message="distilled messages summary", tool_calls=[]),  # distill_messages
+            LLMResponse(message="distilled memory digest", tool_calls=[]),     # distill_memory
             LLMResponse(message="gut: feels important", tool_calls=[]),   # gut
             LLMResponse(message="suggest: respond warmly", tool_calls=[]), # suggest
             LLMResponse(message="Hello there, thanks for reaching out.", tool_calls=[]), # reply
@@ -296,6 +331,8 @@ class TestNeuralDreamerOnMessage:
         ctx = make_mock_ctx(files)
 
         responses = iter([
+            LLMResponse(message="distilled messages", tool_calls=[]),  # distill_messages
+            # No distill_memory call since thinking.md is empty
             LLMResponse(message="gut feeling", tool_calls=[]),
             LLMResponse(message="suggestions", tool_calls=[]),
             LLMResponse(message="   ", tool_calls=[]),     # blank reply
@@ -319,6 +356,8 @@ class TestNeuralDreamerOnMessage:
         ctx = make_mock_ctx(files)
 
         responses = iter([
+            LLMResponse(message="distilled messages", tool_calls=[]),  # distill_messages
+            # No distill_memory call since thinking.md is empty
             LLMResponse(message="gut", tool_calls=[]),
             LLMResponse(message="suggest", tool_calls=[]),
             LLMResponse(message="reply text", tool_calls=[]),
@@ -347,6 +386,8 @@ class TestNeuralDreamerOnMessage:
         ctx = make_mock_ctx(files)
 
         responses = iter([
+            LLMResponse(message="distilled messages", tool_calls=[]),  # distill_messages
+            # No distill_memory call since thinking.md is empty
             LLMResponse(message="gut feeling\nreply_value: 0.3", tool_calls=[]),
             LLMResponse(message="suggestions", tool_calls=[]),
             LLMResponse(message="actual reply text", tool_calls=[]),
@@ -437,10 +478,18 @@ class TestNNIntegration:
             LLMResponse(message="", tool_calls=[
                 ToolCall(id="t1", name="done", arguments={}),
             ]),
-            # Subconscious phase → concerns.md
+            # organize phase: done immediately
+            LLMResponse(message="", tool_calls=[
+                ToolCall(id="t2", name="done", arguments={}),
+            ]),
+            # Subconscious phase → concerns_and_ideas.md
             LLMResponse(message="Some concerns.", tool_calls=[]),
             # Dreaming phase → dreams.md
             LLMResponse(message="Dream of the slow net.", tool_calls=[]),
+            # Create phase: done immediately
+            LLMResponse(message="", tool_calls=[
+                ToolCall(id="t3", name="done", arguments={}),
+            ]),
             # sleep phase: output with signal-like lines
             LLMResponse(
                 message="session_coherence: 0.8\nintention_alignment: 0.6\nI felt engaged throughout.",
@@ -531,7 +580,7 @@ class TestBuildHeartbeatPhases:
         from library.species.neural_dreamer import _build_heartbeat_phases
 
         phases = _build_heartbeat_phases({"_nn_available": False}, {})
-        assert phases == ["think", "subconscious", "dream", "sleep"]
+        assert phases == ["think", "organize", "subconscious", "dream", "create", "sleep"]
 
     def test_nn_available_always_has_think_subconscious_sleep(self):
         from library.species.neural_dreamer import _build_heartbeat_phases
@@ -540,11 +589,9 @@ class TestBuildHeartbeatPhases:
         # Force all probabilistic calls to return False
         with patch("library.species.neural_dreamer.probabilistic", return_value=False):
             phases = _build_heartbeat_phases({"_nn_available": True}, {})
-        assert phases[0] == "think"
-        assert "subconscious" in phases
-        assert phases[-1] == "sleep"
+        # Minimal order: [think, subconscious, dream, sleep]
+        assert phases == ["think", "subconscious", "dream", "sleep"]
         assert "organize" not in phases
-        assert "dream" not in phases
 
     def test_nn_available_all_phases_enabled(self):
         from library.species.neural_dreamer import _build_heartbeat_phases
@@ -589,6 +636,8 @@ class TestHeartbeatOrganizePhase:
         ctx = make_mock_ctx(files)
 
         responses = iter([
+            # distill_memory for think phase
+            LLMResponse(message="Compressed memory", tool_calls=[]),
             # think phase
             LLMResponse(message="", tool_calls=[
                 ToolCall(id="t1", name="done", arguments={}),
@@ -612,7 +661,7 @@ class TestHeartbeatOrganizePhase:
             nd_mod.heartbeat(ctx)
 
         assert "consolidated" in files.get("sleep.md", "")
-        assert "concerns" in files.get("concerns.md", "")
+        assert "concerns" in files.get("concerns_and_ideas.md", "")
 
 
 class TestPostReplyExtraThinking:
@@ -629,11 +678,16 @@ class TestPostReplyExtraThinking:
         ctx = make_mock_ctx(files)
 
         responses = iter([
+            # Distillation calls
+            LLMResponse(message="distilled messages", tool_calls=[]),  # distill_messages
+            LLMResponse(message="distilled thinking", tool_calls=[]),  # distill_memory
             # on_message pipeline: gut, suggest, reply, review
             LLMResponse(message="gut", tool_calls=[]),
             LLMResponse(message="suggest", tool_calls=[]),
             LLMResponse(message="reply text", tool_calls=[]),
             LLMResponse(message="success: 0.8", tool_calls=[]),
+            # distill_memory for extra thinking session
+            LLMResponse(message="distilled memory for thinking", tool_calls=[]),
             # extra thinking session
             LLMResponse(message="", tool_calls=[
                 ToolCall(id="t1", name="done", arguments={}),
@@ -654,8 +708,8 @@ class TestPostReplyExtraThinking:
             )
             nd_mod.on_message(ctx, events)
 
-        # Should have made 5 LLM calls (4 pipeline + 1 extra think)
-        assert ctx.llm.call_count == 5
+        # Should have made 8 LLM calls (2 distillation + 4 pipeline + 1 distillation + 1 extra think)
+        assert ctx.llm.call_count == 8
 
     def test_no_extra_thinking_without_nn(self):
         """Post-reply extra thinking should NOT run when NN is not available."""
@@ -669,6 +723,8 @@ class TestPostReplyExtraThinking:
         ctx = make_mock_ctx(files)
 
         responses = iter([
+            LLMResponse(message="distilled messages", tool_calls=[]),  # distill_messages
+            # No distill_memory since thinking.md is empty
             LLMResponse(message="gut", tool_calls=[]),
             LLMResponse(message="suggest", tool_calls=[]),
             LLMResponse(message="reply", tool_calls=[]),
@@ -679,8 +735,8 @@ class TestPostReplyExtraThinking:
         events = [Event(event_id="e1", sender="@u:test", body="hi", timestamp=1, room="main")]
         nd_mod.on_message(ctx, events)
 
-        # Should have made exactly 4 LLM calls (no extra think)
-        assert ctx.llm.call_count == 4
+        # Should have made 5 LLM calls (1 distill + 4 pipeline, no extra think)
+        assert ctx.llm.call_count == 5
 
 
 class TestSessionMetrics:
@@ -763,24 +819,37 @@ class TestSessionMetrics:
         ctx.list = MagicMock(return_value=[])
 
         responses = iter([
+            # distill_memory for think phase
+            LLMResponse(message="distilled memory for think", tool_calls=[]),
             LLMResponse(message="", tool_calls=[
                 ToolCall(id="t1", name="done", arguments={}),
             ]),
+            # organize phase
+            LLMResponse(message="", tool_calls=[
+                ToolCall(id="t2", name="done", arguments={}),
+            ]),
             LLMResponse(message="concerns", tool_calls=[]),
+            LLMResponse(message="distilled memory for dream", tool_calls=[]),  # dream's distill
             LLMResponse(message="dream", tool_calls=[]),
+            # distill_memory for create phase
+            LLMResponse(message="distilled memory for create", tool_calls=[]),
+            # create phase
+            LLMResponse(message="", tool_calls=[
+                ToolCall(id="t3", name="done", arguments={}),
+            ]),
             LLMResponse(message="sleep output", tool_calls=[]),
         ])
         ctx.llm = MagicMock(side_effect=lambda **kwargs: next(responses))
 
         # Just verify it doesn't crash — metrics are computed and logged
         nd_mod.heartbeat(ctx)
-        # At least 4 LLM calls made (think + subconscious + dream + sleep)
-        assert ctx.llm.call_count == 4
+        # 9 LLM calls made (think distill + think + organize + subconscious + dream distill + dream + create distill + create + sleep)
+        assert ctx.llm.call_count == 9
 
 
 class TestRateLimitedPipeline:
     def test_rate_limited_runs_gut_and_review_only(self):
-        """When rate-limited, on_message should run gut + review (2 LLM calls)."""
+        """When rate-limited, on_message should run gut + review (2 LLM calls plus distillation)."""
         from library.species import neural_dreamer as nd_mod
 
         files = {
@@ -792,6 +861,8 @@ class TestRateLimitedPipeline:
         ctx._reply_rate_limited = True  # Set the rate limit flag
 
         responses = iter([
+            LLMResponse(message="distilled messages", tool_calls=[]),  # distill_messages
+            LLMResponse(message="distilled thinking", tool_calls=[]),  # distill_memory
             LLMResponse(message="gut feeling about this message", tool_calls=[]),
             LLMResponse(message="success: 0.7\ncoherence: 0.6", tool_calls=[]),
         ])
@@ -800,8 +871,8 @@ class TestRateLimitedPipeline:
         events = [Event(event_id="e1", sender="@u:test", body="hi", timestamp=1, room="main")]
         nd_mod.on_message(ctx, events)
 
-        # Should have made exactly 2 LLM calls (gut + review)
-        assert ctx.llm.call_count == 2
+        # Should have made 4 LLM calls (2 distillation + gut + review)
+        assert ctx.llm.call_count == 4
         # No reply should be sent
         ctx.send.assert_not_called()
         # Review should still be accumulated
@@ -820,6 +891,8 @@ class TestRateLimitedPipeline:
         # MagicMock has all attributes — should NOT trigger rate limit
 
         responses = iter([
+            LLMResponse(message="distilled messages", tool_calls=[]),  # distill_messages
+            # No distill_memory since thinking.md is empty
             LLMResponse(message="gut", tool_calls=[]),
             LLMResponse(message="suggest", tool_calls=[]),
             LLMResponse(message="reply", tool_calls=[]),
@@ -830,8 +903,8 @@ class TestRateLimitedPipeline:
         events = [Event(event_id="e1", sender="@u:test", body="hi", timestamp=1, room="main")]
         nd_mod.on_message(ctx, events)
 
-        # Should have made 4 LLM calls (full pipeline, not abbreviated)
-        assert ctx.llm.call_count == 4
+        # Should have made 5 LLM calls (1 distillation + 4 pipeline, not abbreviated)
+        assert ctx.llm.call_count == 5
 
 
 class TestOrganizeToolDispatch:

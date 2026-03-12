@@ -73,15 +73,16 @@ def publish_file(ctx: InstanceContext, path: str, content: str | bytes) -> str:
 
 
 def render_and_publish(ctx: InstanceContext) -> None:
-    """Render graph and activation map, publish to data repo.
+    """Render graph, activation map, and creations gallery, publish to data repo.
 
     Called after heartbeat completes. Renders whatever representations
-    exist (graph, map) and writes them to the publish directory.
+    exist (graph, map, creations) and writes them to the publish directory.
     """
     graph_json = ctx.read("graph.json")
     map_json = ctx.read("activation_map.json")
+    creation_files = ctx.list("creations/")
 
-    if not graph_json and not map_json:
+    if not graph_json and not map_json and not creation_files:
         return
 
     published = []
@@ -130,6 +131,46 @@ def render_and_publish(ctx: InstanceContext) -> None:
                     pass  # HTML version is sufficient
         except Exception as exc:
             logger.warning("Failed to render map: %s", exc)
+
+    # Render creations gallery
+    if creation_files:
+        try:
+            from library.tools.creative import _parse_metadata, _get_body
+            from library.tools.rendering import render_creations_gallery_html
+
+            creations = []
+            for path in sorted(creation_files):
+                raw = ctx.read(path) or ""
+                if not raw.strip():
+                    continue
+                meta = _parse_metadata(raw)
+                body = _get_body(raw)
+                filename = path.split("/")[-1] if "/" in path else path
+                slug = filename.rsplit(".", 1)[0] if "." in filename else filename
+                c_type = meta.get("type", "unknown")
+                creations.append({
+                    "title": meta.get("title", slug),
+                    "type": c_type,
+                    "slug": slug,
+                    "updated": meta.get("updated", ""),
+                    "body": body,
+                })
+                # Publish game HTML and SVG art as individual files so gallery links resolve
+                if c_type == "game" and body.strip():
+                    publish_file(ctx, f"creations/{slug}.html", body)
+                    published.append(f"creations/{slug}.html")
+                elif c_type == "art" and body.strip():
+                    publish_file(ctx, f"creations/{slug}.svg", body)
+                    published.append(f"creations/{slug}.svg")
+
+            if creations:
+                gallery_html = render_creations_gallery_html(
+                    creations, title=f"{ctx.instance_id} — Creations"
+                )
+                publish_file(ctx, "creations.html", gallery_html)
+                published.append("creations.html")
+        except Exception as exc:
+            logger.warning("Failed to render creations gallery: %s", exc)
 
     if published:
         logger.info("Rendered and published: %s", ", ".join(published))

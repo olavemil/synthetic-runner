@@ -13,7 +13,7 @@ from library.tools.thrivemind import (
     build_colony_snapshot,
     select_suggesters,
     run_spawn_cycle,
-    update_approvals,
+    update_cohesion,
     load_colony,
     save_colony,
     spawn_initial_colony,
@@ -107,7 +107,7 @@ class TestColonySnapshot:
         snapshot = build_colony_snapshot(colony)
 
         assert "# Colony" in snapshot
-        assert "| Individual | Personality | Approval | Age |" in snapshot
+        assert "| Individual | Personality | Cohesion | Approval | Age |" in snapshot
         assert "| `b` |" in snapshot
         assert "| `a` |" in snapshot
         assert snapshot.index("| `b` |") < snapshot.index("| `a` |")
@@ -286,54 +286,54 @@ class TestRunSpawnCycle:
 
 
 # ---------------------------------------------------------------------------
-# update_approvals
+# update_cohesion
 # ---------------------------------------------------------------------------
 
 
-class TestUpdateApprovals:
-    def _colony(self, ids_approvals: list[tuple[str, int]]) -> list[Identity]:
+class TestUpdateCohesion:
+    def _colony(self, ids_cohesions: list[tuple[str, float]]) -> list[Identity]:
         return [
-            Identity(name=i, dims={n: 0.0 for n in AXIS_NAMES}, approval=a)
-            for i, a in ids_approvals
+            Identity(name=i, dims={n: 0.0 for n in AXIS_NAMES}, cohesion=c)
+            for i, c in ids_cohesions
         ]
 
     def test_winner_gets_plus_one_per_top_two_voter(self):
-        colony = self._colony([("a", 0), ("b", 0), ("c", 0)])
+        colony = self._colony([("a", 0.0), ("b", 0.0), ("c", 0.0)])
         votes = {
-            "a": ["b", "a", "c"],  # b in top 2 → +1
-            "c": ["c", "b", "a"],  # b in top 2 → +1
+            "a": ["b", "a", "c"],  # b in top 2 → +1 cohesion
+            "c": ["c", "b", "a"],  # b in top 2 → +1 cohesion
         }
         cfg = ThrivemindConfig()
-        updated = update_approvals(colony, votes, "b", cfg)
+        updated = update_cohesion(colony, votes, "b", cfg)
         id_map = {ind.name: ind for ind in updated}
-        assert id_map["b"].approval == 2
+        assert id_map["b"].cohesion == 2.0
 
     def test_voter_with_winner_in_second_pick_still_rewards(self):
-        """Top-2 voting: second pick for winner also gives +1."""
-        colony = self._colony([("a", 0), ("b", 0), ("c", 0)])
+        """Top-2 voting: second pick for winner also gives +1 cohesion."""
+        colony = self._colony([("a", 0.0), ("b", 0.0), ("c", 0.0)])
         votes = {
-            "a": ["c", "b", "a"],  # b is 2nd pick → still +1 for b
+            "a": ["c", "b", "a"],  # b is 2nd pick → still +1 cohesion for b
         }
         cfg = ThrivemindConfig()
-        updated = update_approvals(colony, votes, "b", cfg)
+        updated = update_cohesion(colony, votes, "b", cfg)
         id_map = {ind.name: ind for ind in updated}
-        assert id_map["b"].approval == 1
-        assert id_map["a"].approval == 0  # voted for winner in top 2, no penalty
+        assert id_map["b"].cohesion == 1.0
+        assert id_map["a"].cohesion == 0.0  # voted for winner in top 2, no penalty
 
     def test_non_winner_voter_loses_one(self):
-        colony = self._colony([("a", 0), ("b", 0), ("c", 0)])
+        colony = self._colony([("a", 0.0), ("b", 0.0), ("c", 0.0)])
         votes = {
-            "a": ["a", "c", "b"],  # b not in top 2 → -1 for voter a
-            "b": ["b", "a"],       # b in top 2 → +1 for b
+            "a": ["a", "c", "b"],  # b not in top 2 → -1 cohesion for voter a
+            "b": ["b", "a"],       # b in top 2 → +1 cohesion for b
         }
         cfg = ThrivemindConfig()
-        updated = update_approvals(colony, votes, "b", cfg)
+        updated = update_cohesion(colony, votes, "b", cfg)
         id_map = {ind.name: ind for ind in updated}
-        assert id_map["a"].approval == -1
-        assert id_map["b"].approval == 1
+        assert id_map["a"].cohesion == -1.0
+        assert id_map["b"].cohesion == 1.0
 
     def test_no_votes_no_change(self):
-        colony = self._colony([("x", 5)])
+        colony = self._colony([("x", 5.0)])
         cfg = ThrivemindConfig()
-        updated = update_approvals(colony, {}, "x", cfg)
-        assert updated[0].approval == 5
+        updated = update_cohesion(colony, {}, "x", cfg)
+        assert updated[0].cohesion == 5.0

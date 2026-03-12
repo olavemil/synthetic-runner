@@ -21,6 +21,24 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CATEGORIES = ["spaces", "entities", "concepts", "events"]
 
+# Scope map: which scope each tool belongs to.
+# Imported by library.tools.phases.get_tools_for_scopes().
+ORGANIZE_SCOPE_MAP: dict[str, frozenset[str]] = {
+    # Read tools → knowledge-read
+    "organize_list_categories": frozenset(["knowledge-read"]),
+    "organize_list_topics":     frozenset(["knowledge-read"]),
+    "organize_read_topic":      frozenset(["knowledge-read"]),
+    "organize_list_archives":   frozenset(["knowledge-read"]),
+    "organize_read_archive":    frozenset(["knowledge-read"]),
+    # Knowledge writing → knowledge-write
+    "organize_write_topic":     frozenset(["knowledge-write"]),
+    "organize_create_category": frozenset(["knowledge-write"]),
+    "organize_remove_category": frozenset(["knowledge-write"]),
+    "organize_remove_topic":    frozenset(["knowledge-write"]),
+    # Archive writing → archive-write
+    "organize_archive_thoughts": frozenset(["archive-write"]),
+}
+
 ORGANIZE_TOOL_SCHEMAS = [
     {
         "type": "function",

@@ -11,7 +11,7 @@ steps:
     outputs:
       result: pipeline.visions
 
-  # Phase 2: Worry — messages + concerns + visions → considered approach
+  # Phase 2: Worry — messages + concerns/ideas + visions → considered approach
   - stage: llm_generate
     inputs:
       system: file:prompts/worry.md

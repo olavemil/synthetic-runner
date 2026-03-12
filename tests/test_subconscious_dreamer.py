@@ -272,7 +272,7 @@ class TestSubconsciousDreamerManifest:
         files = s.manifest().default_files
         assert "thinking.md" in files
         assert "dreams.md" in files
-        assert "concerns.md" in files
+        assert "concerns_and_ideas.md" in files
 
 
 class TestSubconsciousDreamerHeartbeat:
@@ -282,7 +282,7 @@ class TestSubconsciousDreamerHeartbeat:
         ctx = make_mock_ctx({
             "thinking.md": "# Thinking\n\nsome thoughts",
             "dreams.md": "vague images",
-            "concerns.md": "a few worries",
+            "concerns_and_ideas.md": "a few worries",
         })
 
         responses = iter([
@@ -302,10 +302,10 @@ class TestSubconsciousDreamerHeartbeat:
 
         sd_mod.heartbeat(ctx)
 
-        # concerns.md and dreams.md should have been updated
+        # concerns_and_ideas.md and dreams.md should have been updated
         write_calls = {call[0][0]: call[0][1] for call in ctx.write.call_args_list}
-        assert "concerns.md" in write_calls
-        assert write_calls["concerns.md"] == "worry about X"
+        assert "concerns_and_ideas.md" in write_calls
+        assert write_calls["concerns_and_ideas.md"] == "worry about X"
         assert "dreams.md" in write_calls
         assert write_calls["dreams.md"] == "dream of flying"
 
@@ -317,7 +317,7 @@ class TestSubconsciousDreamerOnMessage:
         ctx = make_mock_ctx({
             "thinking.md": "some thoughts",
             "dreams.md": "some dreams",
-            "concerns.md": "some concerns",
+            "concerns_and_ideas.md": "some concerns",
         })
 
         responses = iter([
@@ -347,7 +347,7 @@ class TestSubconsciousDreamerOnMessage:
         ctx = make_mock_ctx({
             "thinking.md": "thoughts",
             "dreams.md": "dreams",
-            "concerns.md": "concerns",
+            "concerns_and_ideas.md": "concerns",
         })
 
         responses = iter([

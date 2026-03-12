@@ -45,6 +45,7 @@ _PROMPT_CONTRIBUTE = (_PROMPTS_DIR / "contribute_constitution.md").read_text()
 _PROMPT_CONTRIBUTE_RETRY = (_PROMPTS_DIR / "contribute_constitution_retry.md").read_text()
 _PROMPT_REWRITE = (_PROMPTS_DIR / "rewrite_constitution.md").read_text()
 _PROMPT_VOTE = (_PROMPTS_DIR / "vote_constitution.md").read_text()
+_PROMPT_VOTE_PEER = (_PROMPTS_DIR / "vote_peer.md").read_text()
 
 
 def _word_count(text: str) -> int:
@@ -196,7 +197,7 @@ def load_config(ctx: InstanceContext) -> ThrivemindConfig:
         min_colony_size=min_size,
         max_colony_size=max_size,
         suggestion_fraction=max(0.1, _coerce_float(raw.get("suggestion_fraction"), 0.5)),
-        approval_threshold=_coerce_int(raw.get("approval_threshold"), 3),
+        approval_threshold=_coerce_int(raw.get("approval_threshold"), 5),
         consensus_threshold=max(0.0, _coerce_float(raw.get("consensus_threshold"), 0.6)),
         round_timeout_s=_coerce_int(raw.get("round_timeout_s"), 30),
         suggestion_model=str(raw.get("suggestion_model", "")),
@@ -210,6 +211,7 @@ def _identity_from_dict(d: dict) -> Identity:
         name=str(d.get("name") or d.get("id", "")),
         dims={k: float(v) for k, v in d.get("dims", {}).items()},
         approval=int(d.get("approval", 0)),
+        cohesion=float(d.get("cohesion", 0.0)),
         created_at=int(d.get("created_at", 0)),
         age=int(d.get("age", 0)),
     )
@@ -220,6 +222,7 @@ def _identity_to_dict(ind: Identity) -> dict:
         "name": ind.name,
         "dims": ind.dims or {},
         "approval": ind.approval,
+        "cohesion": ind.cohesion,
         "created_at": ind.created_at,
         "age": ind.age,
     }
@@ -247,6 +250,11 @@ def _md_escape(text: str) -> str:
     return text.replace("|", "\\|").replace("\n", " ")
 
 
+def _spawn_score(ind: Identity) -> float:
+    """Combined spawn score: cohesion + approval."""
+    return ind.cohesion + ind.approval
+
+
 def build_colony_snapshot(colony: list[Identity], events: list[dict] | None = None) -> str:
     """Render a human-readable colony snapshot markdown document."""
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
@@ -256,16 +264,18 @@ def build_colony_snapshot(colony: list[Identity], events: list[dict] | None = No
         f"Generated: {timestamp}",
         f"Individuals: {len(colony)}",
         "",
-        "| Individual | Personality | Approval | Age |",
-        "| --- | --- | ---: | ---: |",
+        "| Individual | Personality | Cohesion | Approval | Age |",
+        "| --- | --- | ---: | ---: | ---: |",
     ]
 
     if not colony:
-        lines.append("| - | - | 0 | 0 |")
+        lines.append("| - | - | 0 | 0 | 0 |")
     else:
-        for ind in sorted(colony, key=lambda i: (-i.approval, i.created_at, i.name)):
+        for ind in sorted(colony, key=lambda i: (-_spawn_score(i), i.created_at, i.name)):
             personality = _md_escape(format_persona(ind))
-            lines.append(f"| `{ind.name}` | {personality} | {ind.approval} | {ind.age} |")
+            lines.append(
+                f"| `{ind.name}` | {personality} | {ind.cohesion:.1f} | {ind.approval} | {ind.age} |"
+            )
 
     events_section = format_events_for_context(events or [])
     if events_section:
@@ -581,6 +591,22 @@ def clear_inbox(ctx: InstanceContext, individual: Identity) -> None:
     ctx.write(_inbox_path(individual), "")
 
 
+def archive_removed_individual(ctx: "InstanceContext", name: str) -> None:
+    """Archive a removed colony individual's final reflection and clean up their files.
+
+    Copies the individual's last reflection (updated during the heartbeat
+    reflection phase) to removed/{name}.md for preservation in the synced data
+    repo. Clears the original reflection file. The inbox is already cleared
+    during the heartbeat reflection phase before the spawn cycle runs.
+    """
+    reflection = (ctx.read(_reflection_path(name)) or "").strip()
+    archived = reflection if reflection else "(no data)"
+
+    ctx.write(f"removed/{quote(name, safe='-_.,')}.md", archived)
+    ctx.write(_reflection_path(name), "")
+    logger.info("Archived removed individual %s to removed/%s.md", name, name)
+
+
 def deliver_message(
     ctx: InstanceContext,
     sender: Identity,
@@ -694,7 +720,7 @@ def spawn_initial_colony(
         dims = {name: round(rng.uniform(-1.0, 1.0), 4) for name in AXIS_NAMES}
         ind_name = _generate_name(rng, existing_names)
         existing_names.add(ind_name)
-        colony.append(Identity(name=ind_name, dims=dims, approval=0, created_at=now))
+        colony.append(Identity(name=ind_name, dims=dims, approval=0, cohesion=0.0, created_at=now))
     return colony
 
 
@@ -954,7 +980,7 @@ def _make_offspring(
             offspring_dims[name] = primary.dims.get(name, 0.0) if primary.dims else 0.0
     child_name = _generate_name(rng, existing_names)
     existing_names.add(child_name)
-    return Identity(name=child_name, dims=offspring_dims, approval=0, created_at=now)
+    return Identity(name=child_name, dims=offspring_dims, approval=0, cohesion=0.0, created_at=now)
 
 
 def run_spawn_cycle(
@@ -972,12 +998,12 @@ def run_spawn_cycle(
     if not colony:
         return colony
 
-    eligible = [ind for ind in colony if ind.approval >= cfg.approval_threshold]
+    eligible = [ind for ind in colony if _spawn_score(ind) >= cfg.approval_threshold]
     if not eligible:
         return colony
 
-    total_approval = sum(ind.approval for ind in eligible)
-    if total_approval == 0:
+    total_score = sum(max(0.0, _spawn_score(ind)) for ind in eligible)
+    if total_score == 0:
         return colony
 
     existing_names = {ind.name for ind in colony}
@@ -990,7 +1016,7 @@ def run_spawn_cycle(
         for primary in eligible:
             if len(new_individuals) >= room:
                 break
-            weights = [ind.approval / total_approval for ind in eligible]
+            weights = [max(0.0, _spawn_score(ind)) / total_score for ind in eligible]
             (other,) = rng.choices(eligible, weights=weights, k=1)
             new_individuals.append(_make_offspring(primary, other, rng, existing_names, now))
 
@@ -999,7 +1025,7 @@ def run_spawn_cycle(
         # At or over max: replace eligible parents with offspring
         to_remove_names: set[str] = set()
         for primary in eligible:
-            weights = [ind.approval / total_approval for ind in eligible]
+            weights = [max(0.0, _spawn_score(ind)) / total_score for ind in eligible]
             (other,) = rng.choices(eligible, weights=weights, k=1)
             new_individuals.append(_make_offspring(primary, other, rng, existing_names, now))
             to_remove_names.add(primary.name)
@@ -1007,9 +1033,9 @@ def run_spawn_cycle(
         remaining = [ind for ind in colony if ind.name not in to_remove_names]
         new_colony = remaining + new_individuals
 
-    # Trim to max
+    # Trim to max (lowest combined score removed first)
     if len(new_colony) > cfg.max_colony_size:
-        new_colony.sort(key=lambda i: i.approval)
+        new_colony.sort(key=_spawn_score)
         new_colony = new_colony[len(new_colony) - cfg.max_colony_size:]
 
     # Pad to min
@@ -1017,6 +1043,11 @@ def run_spawn_cycle(
         primary = rng.choice(eligible)
         other = rng.choice(eligible)
         new_colony.append(_make_offspring(primary, other, rng, existing_names, now))
+
+    # Apply decay to cohesion and approval
+    for ind in new_colony:
+        ind.cohesion *= 0.9
+        ind.approval *= 0.9
 
     return new_colony
 
@@ -1026,33 +1057,107 @@ def run_spawn_cycle(
 # ---------------------------------------------------------------------------
 
 
-def update_approvals(
+def update_cohesion(
     colony: list[Identity],
     votes: dict[str, list[str]],
     winner_id: str,
     cfg: ThrivemindConfig,  # noqa: ARG001 kept for API consistency
 ) -> list[Identity]:
-    """Update approval scores based on vote results.
+    """Update cohesion scores based on message deliberation vote results.
 
-    Voters who ranked the winner in their top 2 picks get +1 approval for
-    the winner. Voters whose top pick was not the winner lose -1 on
-    themselves. This dual-pick system makes positive approval more
-    achievable since voters have two chances to back the winner.
+    Cohesion measures how closely aligned an individual is with the group
+    consensus. The winner gains +1 cohesion for each voter who backed them.
+    Voters who did not back the winner lose -1 cohesion.
     """
     id_map = {ind.name: ind for ind in colony}
+    
+    logger.info(
+        "update_cohesion: winner=%s, voters=%d, colony_size=%d",
+        winner_id, len(votes), len(colony),
+    )
 
+    cohesion_changes = 0
     for voter_name, ranking in votes.items():
         if not ranking:
             continue
         top_two = ranking[:2]
         if winner_id in top_two:
             if winner_id in id_map:
-                id_map[winner_id].approval += 1
+                id_map[winner_id].cohesion += 1.0
+                cohesion_changes += 1
+                logger.debug("  %s backed winner %s → winner +1.0", voter_name, winner_id)
         else:
             if voter_name in id_map:
-                id_map[voter_name].approval -= 1
+                id_map[voter_name].cohesion -= 1.0
+                cohesion_changes += 1
+                logger.debug("  %s did not back winner %s → voter -1.0", voter_name, winner_id)
+
+    logger.info(
+        "update_cohesion: applied %d cohesion changes, winner_cohesion=%.1f",
+        cohesion_changes,
+        id_map.get(winner_id, Identity(name="")).cohesion if winner_id in id_map else 0.0,
+    )
 
     return list(id_map.values())
+
+
+def vote_peer_approval(
+    ctx: "InstanceContext",
+    colony: list[Identity],
+    cfg: ThrivemindConfig,  # noqa: ARG001 kept for API consistency
+    constitution_result: str,
+    colony_overview: str,
+) -> list[Identity]:
+    """Peer approval voting after constitution vote.
+
+    Each individual endorses exactly 2 others. Approval changes by:
+        new_approval = prior_approval + votes_received - 1
+
+    The -1 is the cost of voting (you always spend 1 regardless of outcome).
+    """
+    id_map = {ind.name: ind for ind in colony}
+    votes_received: dict[str, int] = {ind.name: 0 for ind in colony}
+    valid_names = set(id_map)
+
+    for individual in colony:
+        prompt = (
+            _PROMPT_VOTE_PEER
+            .replace("{name}", individual.name)
+            .replace("{constitution_result}", constitution_result)
+            .replace("{colony_overview}", colony_overview)
+        )
+        response = ctx.llm(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=256,
+            caller=f"peer_vote_{individual.name}",
+        )
+        raw = (response.message or "").strip()
+
+        # Parse JSON endorsements
+        endorsements: list[str] = []
+        try:
+            data = json.loads(raw)
+            endorsements = [str(e) for e in data.get("endorsements", [])]
+        except (ValueError, AttributeError):
+            # Try to extract names from raw text
+            for name in valid_names:
+                if name in raw and name != individual.name:
+                    endorsements.append(name)
+
+        # Apply endorsements (max 2, excluding self)
+        for endorsed in endorsements[:2]:
+            if endorsed in votes_received and endorsed != individual.name:
+                votes_received[endorsed] += 1
+
+    # Apply approval delta: votes_received - 1 (cost of voting)
+    for ind in colony:
+        ind.approval = ind.approval + votes_received[ind.name] - 1
+
+    logger.info(
+        "Peer approval vote: %s",
+        ", ".join(f"{n}={v}" for n, v in sorted(votes_received.items())),
+    )
+    return colony
 
 
 # ---------------------------------------------------------------------------
@@ -1119,14 +1224,25 @@ def format_consensus_status(
     result: dict, fallback_coverage: float | None = None
 ) -> str:
     """Format a human-readable consensus status line."""
-    winner_pct = max(0, min(100, int(round(winner_approval_ratio(result) * 100))))
+    # Use new approval voting consensus field if available
+    winner_consensus = result.get("consensus", 0.0)
+    if winner_consensus == 0.0:
+        # Fallback to old Borda ratio calculation for backwards compatibility
+        winner_consensus = winner_approval_ratio(result)
+    
+    winner_pct = max(0, min(100, int(round(winner_consensus * 100))))
     has_consensus = (
         bool(result.get("has_consensus"))
         or int(result.get("candidate_count", 0) or 0) == 1
     )
+    has_combined = bool(result.get("has_combined_consensus", False))
 
     if has_consensus:
         return f"Consensus: {winner_pct}% approval."
+
+    if has_combined:
+        combined_pct = max(0, min(100, int(round(result.get("combined_consensus", 0.0) * 100))))
+        return f"Consensus: Combined {combined_pct}% approval (top 2 candidates)."
 
     if fallback_coverage is not None and fallback_coverage > 0:
         fallback_pct = max(0, min(100, int(round(fallback_coverage * 100))))

@@ -90,11 +90,22 @@ class Worker:
                 logger.debug("No more jobs to claim (claimed_jobs=%d)", claimed_jobs)
                 break
             claimed_jobs += 1
-            logger.debug("Claimed job for %s (job_id=%s, entry_point=%s, can_run=%s)", 
-                        job.instance_id, job.job_id, job.entry_point, self._can_run(job.instance_id))
+            logger.debug("Claimed job for %s (job_id=%s, entry_point=%s)", 
+                        job.instance_id, job.job_id, job.entry_point)
 
             provider_id = self._get_provider_id(job.instance_id)
-            slot_key = self._claim_provider_slot(provider_id)
+            slot_key, slot_available = self._claim_provider_slot(provider_id)
+
+            if not slot_available:
+                # Race condition: can_run passed but slot claim failed
+                # Complete the job without running it
+                logger.warning(
+                    "Failed to claim provider slot for %s (provider=%s) - "
+                    "race condition in concurrent job claiming. Job will be skipped.",
+                    job.instance_id, provider_id
+                )
+                self._queue.complete(job, self._worker_id)
+                continue
 
             t = threading.Thread(
                 target=self._run_job,
@@ -326,18 +337,25 @@ class Worker:
         logger.debug("%s can_run=%s (provider=%s, used=%d/%d slots)", instance_id, can_run, provider_id, used, max_conc)
         return can_run
 
-    def _claim_provider_slot(self, provider_id: str | None) -> str | None:
+    def _claim_provider_slot(self, provider_id: str | None) -> tuple[str | None, bool]:
+        """Try to claim a provider concurrency slot.
+
+        Returns (slot_key, available):
+          - (None, True)      — no concurrency limit configured, proceed without a slot
+          - (slot_key, True)  — slot claimed successfully
+          - (None, False)     — all slots taken (race condition)
+        """
         if not provider_id:
-            return None
+            return None, True
         max_conc = self._get_max_concurrency(provider_id)
         if max_conc is None:
-            return None
+            return None, True
 
         for i in range(max_conc):
             slot_key = f"{provider_id}:slot:{i}"
             if self._slots_store.claim(slot_key, self._worker_id):
-                return slot_key
-        return None
+                return slot_key, True
+        return None, False
 
     def _release_provider_slot(self, slot_key: str) -> None:
         self._slots_store.release(slot_key, self._worker_id)

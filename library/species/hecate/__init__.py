@@ -31,6 +31,7 @@ _SPECIES_DIR = Path(__file__).parent
 _SUGGEST_PROMPT = (_SPECIES_DIR / "prompts/suggest.md").read_text()
 _COMPOSE_PROMPT = (_SPECIES_DIR / "prompts/compose.md").read_text()
 _SUBCONSCIOUS_PROMPT = (_SPECIES_DIR / "prompts/subconscious.md").read_text()
+_CREATE_PROMPT = (_SPECIES_DIR / "prompts/create.md").read_text()
 
 _DEFAULT_VOICE_NAMES = ["Aria", "Sable", "Lune"]
 
@@ -160,12 +161,12 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
 
 
 def _run_organize_phase(ctx: InstanceContext, cfg: "HecateConfig") -> None:
-    """Knowledge organization phase: tool-use session with organize + graph tools."""
+    """Knowledge organization phase: tool-use session with organize + graph + map tools."""
     from library.tools.patterns import thinking_session
-    from library.tools.organize import ORGANIZE_TOOL_SCHEMAS, _list_category_names, _list_topics_in_category
-    from library.tools.graph import GRAPH_TOOL_SCHEMAS
+    from library.tools.organize import _list_category_names, _list_topics_in_category
+    from library.tools.phases import ORGANIZE_SCOPES, get_tools_for_scopes
 
-    organize_tools = ORGANIZE_TOOL_SCHEMAS + GRAPH_TOOL_SCHEMAS
+    organize_tools = get_tools_for_scopes(ORGANIZE_SCOPES, graph=True, activation_map=True)
 
     # Build context: combined voice thoughts + knowledge summary
     categories = _list_category_names(ctx)
@@ -210,6 +211,33 @@ def _run_organize_phase(ctx: InstanceContext, cfg: "HecateConfig") -> None:
     logger.info("Hecate heartbeat: organize phase complete")
 
 
+def _run_create_phase(ctx: InstanceContext, cfg: "HecateConfig") -> None:
+    """Creative phase: tool-use session with creative artifact tools."""
+    from library.tools.patterns import thinking_session
+    from library.tools.phases import CREATE_SCOPES, get_tools_for_scopes
+
+    create_tools = get_tools_for_scopes(CREATE_SCOPES, creative=True)
+
+    voice_thoughts = "\n\n".join(
+        f"### {voice.name}\n{ctx.read(f'{voice.name.lower()}_thinking.md') or '(no thoughts yet)'}"
+        for voice in cfg.voices
+    )
+    dreams = ctx.read("dreams.md") or ""
+    create_context = f"## Current Voice Thoughts\n\n{voice_thoughts}"
+    if dreams.strip():
+        create_context += f"\n\n## Dreams\n\n{dreams}"
+
+    logger.info("Hecate heartbeat: running create phase")
+    thinking_session(
+        ctx,
+        system=_CREATE_PROMPT,
+        initial_message=create_context,
+        max_tokens=16384,
+        extra_tools=create_tools,
+    )
+    logger.info("Hecate heartbeat: create phase complete")
+
+
 def heartbeat(ctx: InstanceContext) -> None:
     """Thinking iterations: each voice reflects, informed by others. Then optional organize phase."""
     cfg = load_config(ctx)
@@ -229,8 +257,12 @@ def heartbeat(ctx: InstanceContext) -> None:
         )
         voice_memories = {v.name: load_voice_memory(ctx, v) for v in cfg.voices}
 
+        # Randomize voice processing order each iteration to prevent precedence bias
+        shuffled_voices = list(cfg.voices)
+        random.shuffle(shuffled_voices)
+
         new_thoughts: dict[str, str] = {}
-        for voice in cfg.voices:
+        for voice in shuffled_voices:
             others = {name: t for name, t in previous_thoughts.items() if name != voice.name}
             thought = think_with_context(
                 ctx,
@@ -249,6 +281,9 @@ def heartbeat(ctx: InstanceContext) -> None:
 
     # Organize phase: runs after all thinking iterations
     _run_organize_phase(ctx, cfg)
+
+    # Creative phase: runs after organize
+    _run_create_phase(ctx, cfg)
 
 
 class HecateSpecies(Species):

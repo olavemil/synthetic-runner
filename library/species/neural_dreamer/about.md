@@ -7,7 +7,7 @@ Neural Dreamer is a reflective agent with two neural networks that shape its beh
 | File | Purpose |
 |------|---------|
 | `thinking.md` | Accumulated thoughts, written during thinking sessions |
-| `concerns.md` | Subconscious concerns — tensions, worries, unfinished things |
+| `concerns_and_ideas.md` | Subconscious output — concerns, tensions, emerging ideas, curiosities |
 | `dreams.md` | Associative dream output — images, symbols, meaning-seeking |
 | `sleep.md` | Session consolidation output — coherence assessment, emotional characterisation, updated self-description |
 | `last_review.md` | Most recent fast cycle review (structured signals) |
@@ -20,6 +20,7 @@ Neural Dreamer is a reflective agent with two neural networks that shape its beh
 | `nets/fast_meta.json` | Fast net metadata (update count, session label) |
 | `nets/slow_meta.json` | Slow net metadata |
 | `nets/history.json` | Rolling checkpoint history |
+| `creations/` | Creative artifacts — art (.svg), narrative (.md), poetry (.md), music (.abc), game (.html) |
 
 ## Fast cycle (on_message)
 
@@ -46,8 +47,10 @@ heartbeat:
   inject segments into prompts
 
   think        = tool-use session (graph, map, append/replace thinking)
-  subconscious = surface concerns from thinking + dreams (inner tensions, worries)
-  dream        = associative processing from thinking + concerns (images, symbols)
+  organize     = knowledge management (categorize, write, archive topics)
+  subconscious = surface concerns and ideas from thinking + dreams (tensions, curiosities)
+  dream        = associative processing from thinking + concerns/ideas (images, symbols)
+  create       = open-ended creative expression (art, narrative, poetry, music, game)
   sleep        = consolidation (coherence, emotional characterisation, self-description)
 
   train slow net on sleep signals
@@ -67,6 +70,7 @@ heartbeat:
 - `graph_query` / `graph_describe` / `graph_snapshot` — explore the graph
 - `map_define` / `map_set` / `map_set_region` / `map_clear` — author the activation map
 - `map_get` / `map_describe` / `map_snapshot` — read the map
+- `creative_new` / `creative_edit` / `creative_read` / `creative_list` / `creative_delete` — manage creative artifacts
 
 ## Segment system
 

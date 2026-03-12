@@ -220,10 +220,11 @@ class TestCheckerSchedule:
         assert queue.pending_count() == count_before  # nothing added
 
 
-    def test_max_thinks_per_reply_throttles_heartbeat(self):
+    def test_heartbeats_increment_thinks_counter(self):
+        """With inverted throttling, heartbeats always run and increment thinks counter."""
         db = open_store()
         species = _make_species(schedule="* * * * *")
-        instance = _make_instance(schedule={"max_thinks_per_reply": 1})
+        instance = _make_instance(schedule={"min_thinks_per_reply": 3})
         registry = Registry()
         registry.register_species(species)
         registry.register_instance(instance)
@@ -243,15 +244,21 @@ class TestCheckerSchedule:
                 job = queue.claim_next("w")
                 queue.complete(job, "w")
 
-        _trigger()  # thinks=1, enqueues (0 < 1)
-        count_after_first = queue.pending_count()
-        _trigger()  # thinks=1 >= 1, skips
-        assert queue.pending_count() == count_after_first  # nothing added
+        # Heartbeats always enqueue and increment counter (no throttling)
+        thinks = checker._store.get("thinks_since_reply:inst-1")
+        assert thinks is None or thinks == 0
+        _trigger()  # thinks: 0 -> 1
+        assert checker._store.get("thinks_since_reply:inst-1") == 1
+        _trigger()  # thinks: 1 -> 2
+        assert checker._store.get("thinks_since_reply:inst-1") == 2
+        _trigger()  # thinks: 2 -> 3
+        assert checker._store.get("thinks_since_reply:inst-1") == 3
 
-    def test_max_thinks_per_reply_resets_on_message(self):
+    def test_thinks_counter_persists_on_message_arrival(self):
+        """With inverted throttling, counter does NOT reset on message arrival."""
         db = open_store()
         species = _make_species(schedule="* * * * *")
-        instance = _make_instance(schedule={"max_thinks_per_reply": 1}, with_messaging=True)
+        instance = _make_instance(schedule={"min_thinks_per_reply": 3}, with_messaging=True)
         registry = Registry()
         registry.register_species(species)
         registry.register_instance(instance)
@@ -264,11 +271,11 @@ class TestCheckerSchedule:
         )
         queue = JobQueue(db)
 
-        # Saturate thinks_since_reply
+        # Set thinks counter to 5
         checker._store.put("thinks_since_reply:inst-1", 5)
 
-        # Simulate a message arriving (poll_instance resets counter)
-        checker._store.put("inst-1:main", "tok0")  # pre-seeded token so poll produces events
+        # Simulate a message arriving
+        checker._store.put("inst-1:main", "tok0")
         evt = Event(
             event_id="$evt1",
             sender="@user:matrix.org",
@@ -282,17 +289,8 @@ class TestCheckerSchedule:
         with patch.object(checker, "_get_adapter", return_value=adapter):
             checker._poll_instance(instance)
 
-        # Counter should be reset to 0
-        assert checker._store.get("thinks_since_reply:inst-1") == 0
-
-        # Now heartbeat should be schedulable again
-        checker._store.put("schedule_next:inst-1:heartbeat", time.time() - 1)
-        # Drain on_message job first
-        if queue.has_active("inst-1"):
-            job = queue.claim_next("w")
-            queue.complete(job, "w")
-        checker._check_schedules(set())
-        assert queue.pending_count() == 1
+        # Counter should NOT be reset (only ctx.send resets it)
+        assert checker._store.get("thinks_since_reply:inst-1") == 5
 
 
 class TestCheckerReactive:

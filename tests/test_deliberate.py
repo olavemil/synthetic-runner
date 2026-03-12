@@ -171,16 +171,17 @@ class TestMultiVote:
         assert "Sable" not in votes["Sable"]
         assert "Lune" not in votes["Lune"]
 
-    def test_top_n_truncates_ranking(self):
+    def test_always_returns_two_approvals(self):
+        """With approval voting, each voter approves exactly 2 candidates (or all if fewer)."""
         def llm_fn(msgs, **kw):
-            return SimpleNamespace(message='{"ranking": ["Sable", "Aria", "Lune"]}')
+            return SimpleNamespace(message='{"approved": ["Sable", "Aria"]}')
 
         ctx = DummyCtx(llm_fn)
         voices = self._voices()
         candidates = {"Aria": "text a", "Sable": "text b", "Lune": "text c"}
-        votes = multi_vote(ctx, voices, candidates, "prompt", top_n=1)
-        for ranking in votes.values():
-            assert len(ranking) <= 1
+        votes = multi_vote(ctx, voices, candidates, "prompt")
+        for approved in votes.values():
+            assert len(approved) == 2  # Always 2 when 3+ candidates
 
     def test_invalid_json_falls_back_gracefully(self):
         def llm_fn(msgs, **kw):

@@ -23,7 +23,7 @@ _ON_MESSAGE_STEPS = load_pipeline((_SPECIES_DIR / "on_message.yaml").read_text()
 DEFAULT_FILES = {
     "thinking.md": "# Thinking\n",
     "dreams.md": "",
-    "concerns.md": "",
+    "concerns_and_ideas.md": "",
 }
 
 
@@ -59,10 +59,10 @@ def heartbeat(ctx: InstanceContext) -> None:
     """Three-phase thinking: active session → subconscious → dreaming."""
     thinking = ctx.read("thinking.md") or ""
     dreams = ctx.read("dreams.md") or ""
-    concerns = ctx.read("concerns.md") or ""
+    concerns = ctx.read("concerns_and_ideas.md") or ""
 
     thinking_context = _build_context(
-        ("Your Concerns", concerns),
+        ("Your Concerns & Ideas", concerns),
         ("Your Dreams", dreams),
         ("Your Current Thoughts", thinking),
     ) or "This is your first thinking session."
@@ -75,7 +75,7 @@ def heartbeat(ctx: InstanceContext) -> None:
         ],
         "dreaming_sections": [
             ["thinking.md", "Your Thoughts"],
-            ["concerns.md", "Your Concerns"],
+            ["concerns_and_ideas.md", "Your Concerns & Ideas"],
         ],
         "_species_dir": str(_SPECIES_DIR),
     }
@@ -90,7 +90,7 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
 
     events_text = format_events(events, self_entity_id=get_entity_id(ctx))
     dreams = ctx.read("dreams.md") or ""
-    concerns = ctx.read("concerns.md") or ""
+    concerns = ctx.read("concerns_and_ideas.md") or ""
     thinking = ctx.read("thinking.md") or ""
     dream_name = _extract_dream_name(dreams)
 
@@ -101,7 +101,7 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
         ),
         "worry_context": _build_context(
             ("Incoming Messages", events_text),
-            ("Your Concerns", concerns),
+            ("Your Concerns & Ideas", concerns),
         ),
         "action_context": _build_context(
             ("Incoming Messages", events_text),

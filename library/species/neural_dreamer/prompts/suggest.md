@@ -13,3 +13,5 @@ Produce one or two structured response candidates. For each, note:
 Be concrete. The next phase will choose and compose the actual reply.
 
 {segment_state}
+
+{segment_task}

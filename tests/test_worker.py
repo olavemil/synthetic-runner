@@ -490,6 +490,27 @@ class TestProviderSlots:
         owned_after = [(k, o) for k, _, o in items_after if o is not None]
         assert len(owned_after) == 0
 
+    def test_race_condition_slot_claim_failure(self):
+        """When slot claim fails despite can_run passing, job should be skipped gracefully."""
+        db = open_store()
+        instances = [_make_instance("a"), _make_instance("b")]
+        worker = _build_worker(db, instances, max_concurrency=1)
+        queue = JobQueue(db)
+        
+        # Enqueue two jobs
+        queue.enqueue("a", "on_message")
+        queue.enqueue("b", "on_message")
+        
+        with patch.object(worker, "_build_context") as mock_ctx, \
+             patch.object(worker, "_claim_provider_slot") as mock_claim:
+            mock_ctx.return_value = MagicMock()
+            # Simulate race: first claim succeeds, second fails
+            mock_claim.side_effect = [("default:slot:0", True), (None, False)]
+            worker.run()
+        
+        # Both jobs should be completed (second one skipped due to no slot)
+        assert len(queue.list_pending()) == 0
+
 
 class TestReplyRateLimitWiring:
     """Tests for rate limit integration in worker job execution."""

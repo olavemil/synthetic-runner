@@ -7,7 +7,7 @@ steps:
       extra_tools: pipeline.thinking_tools
       max_tokens: "16384"
 
-  # Phase 2: Subconscious — reads thinking + dreams → concerns.md
+  # Phase 2: Subconscious — reads thinking + dreams → concerns_and_ideas.md
   - stage: format_context
     inputs:
       sections: pipeline.subconscious_sections
@@ -20,9 +20,9 @@ steps:
       content: pipeline.subconscious_context
       max_tokens: "4096"
     outputs:
-      result: memory.concerns
+      result: memory.concerns_and_ideas
 
-  # Phase 3: Dreaming — reads thinking + concerns → dreams.md
+  # Phase 3: Dreaming — reads thinking + concerns/ideas → dreams.md
   - stage: format_context
     inputs:
       sections: pipeline.dreaming_sections

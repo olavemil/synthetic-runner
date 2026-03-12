@@ -200,9 +200,8 @@ class Checker:
             # Ensure a job exists to process the inbox
             enqueued = self._ensure_job(instance_id, "on_message")
 
-            # Reset idle and thinks-since-reply counters on new messages
+            # Reset idle counter on new messages
             self._store.put(f"idle:{instance_id}", 0)
-            self._store.put(f"thinks_since_reply:{instance_id}", 0)
 
         return got_messages, enqueued
 
@@ -344,12 +343,6 @@ class Checker:
                 except (ValueError, TypeError):
                     max_idle = None
 
-            max_thinks = instance_config.schedule.get("max_thinks_per_reply", 1)
-            try:
-                max_thinks = int(max_thinks)
-            except (ValueError, TypeError):
-                max_thinks = 1
-
             logger.debug("%s schedule_map keys: %s", instance_id, list(schedule_map.keys()))
             for ep_name, cron_expr in schedule_map.items():
                 key = f"schedule_next:{instance_id}:{ep_name}"
@@ -387,19 +380,6 @@ class Checker:
                         else:
                             self._store.put(idle_key, idle_count + 1)
 
-                    # Thinks-per-reply throttle: cap heartbeats between replies
-                    if not throttled and max_thinks is not None:
-                        thinks_key = f"thinks_since_reply:{instance_id}"
-                        thinks_count = self._store.get(thinks_key) or 0
-                        if thinks_count >= max_thinks:
-                            logger.debug(
-                                "Skipping %s.%s (thinks_since_reply=%d >= max_thinks_per_reply=%d)",
-                                instance_id, ep_name, thinks_count, max_thinks,
-                            )
-                            throttled = True
-                        else:
-                            self._store.put(thinks_key, thinks_count + 1)
-
                     # If heartbeat is throttled, check for pending messages instead
                     if throttled:
                         pending_key = f"pending_events:{instance_id}"
@@ -412,7 +392,13 @@ class Checker:
                             self._ensure_job(instance_id, "on_message")
                         continue
 
-                # Enqueue or merge into existing pending job
+                # Enqueue heartbeat and increment thinks counter
+                if ep_name == "heartbeat":
+                    thinks_key = f"thinks_since_reply:{instance_id}"
+                    thinks_count = self._store.get(thinks_key) or 0
+                    self._store.put(thinks_key, thinks_count + 1)
+                    logger.debug("%s heartbeat thinks_since_reply: %d -> %d", instance_id, thinks_count, thinks_count + 1)
+
                 ensured = self._ensure_job(instance_id, ep_name)
                 logger.debug("%s.%s ensure_job returned: %s", instance_id, ep_name, ensured)
                 if ensured:

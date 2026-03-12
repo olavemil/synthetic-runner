@@ -265,6 +265,10 @@ class TestHecateOrganizePhase:
                 return LLMResponse(message="", tool_calls=[
                     ToolCall(id="t1", name="done", arguments={"summary": "organized"}),
                 ])
+            if "creative_list" in tool_names:
+                return LLMResponse(message="", tool_calls=[
+                    ToolCall(id="t2", name="done", arguments={}),
+                ])
             return LLMResponse(message="voice thought", tool_calls=[])
 
         ctx = DummyCtx(THREE_VOICES_CFG, llm_fn=llm_fn)
@@ -297,6 +301,10 @@ class TestHecateOrganizePhase:
                     return LLMResponse(message="", tool_calls=[
                         ToolCall(id="t2", name="done", arguments={}),
                     ])
+            if "creative_list" in tool_names:
+                return LLMResponse(message="", tool_calls=[
+                    ToolCall(id="t3", name="done", arguments={}),
+                ])
             return LLMResponse(message="voice thought", tool_calls=[])
 
         ctx = DummyCtx(THREE_VOICES_CFG, llm_fn=llm_fn)
@@ -304,3 +312,66 @@ class TestHecateOrganizePhase:
 
         assert "knowledge/concepts/deliberation.md" in ctx._files
         assert "Three voices" in ctx._files["knowledge/concepts/deliberation.md"]
+
+
+class TestHecateCreatePhase:
+    def test_heartbeat_runs_create_after_organize(self):
+        """Heartbeat should run a create tool-use session after organize."""
+        from library.harness.providers import LLMResponse, ToolCall
+
+        create_called = [False]
+
+        def llm_fn(messages, **kwargs):
+            tools = kwargs.get("tools", [])
+            tool_names = [t["function"]["name"] for t in tools]
+            if "creative_list" in tool_names:
+                create_called[0] = True
+                return LLMResponse(message="", tool_calls=[
+                    ToolCall(id="t1", name="done", arguments={}),
+                ])
+            if "organize_list_categories" in tool_names:
+                return LLMResponse(message="", tool_calls=[
+                    ToolCall(id="t2", name="done", arguments={}),
+                ])
+            return LLMResponse(message="voice thought", tool_calls=[])
+
+        ctx = DummyCtx(THREE_VOICES_CFG, llm_fn=llm_fn)
+        heartbeat(ctx)
+
+        assert create_called[0], "Create phase should have been called with creative tools"
+
+    def test_create_phase_can_create_artifact(self):
+        """Create phase can produce a creative artifact via tool calls."""
+        from library.harness.providers import LLMResponse, ToolCall
+
+        create_turn = [0]
+
+        def llm_fn(messages, **kwargs):
+            tools = kwargs.get("tools", [])
+            tool_names = [t["function"]["name"] for t in tools]
+            if "creative_list" in tool_names:
+                turn = create_turn[0]
+                create_turn[0] += 1
+                if turn == 0:
+                    return LLMResponse(message="", tool_calls=[
+                        ToolCall(id="t1", name="creative_new", arguments={
+                            "type": "poetry",
+                            "title": "Three Voices",
+                            "content": "We speak as one\nyet think apart.",
+                        }),
+                    ])
+                else:
+                    return LLMResponse(message="", tool_calls=[
+                        ToolCall(id="t2", name="done", arguments={}),
+                    ])
+            if "organize_list_categories" in tool_names:
+                return LLMResponse(message="", tool_calls=[
+                    ToolCall(id="t3", name="done", arguments={}),
+                ])
+            return LLMResponse(message="voice thought", tool_calls=[])
+
+        ctx = DummyCtx(THREE_VOICES_CFG, llm_fn=llm_fn)
+        heartbeat(ctx)
+
+        assert "creations/three-voices.md" in ctx._files
+        assert "We speak as one" in ctx._files["creations/three-voices.md"]

@@ -26,6 +26,7 @@ from library.species import Species, SpeciesManifest, EntryPoint
 from library.tools.decisions import probabilistic
 from library.tools.pipeline import run_pipeline, load_pipeline
 from library.tools.prompts import format_events, get_entity_id
+from library.tools.patterns import distill_memory, distill_messages
 from library.tools.segments import (
     SegmentRegistry,
     load_registry,
@@ -49,7 +50,7 @@ _REGISTRY = load_registry(_SPECIES_DIR / "segments" / "registry.yaml")
 DEFAULT_FILES = {
     "thinking.md": "# Thinking\n",
     "dreams.md": "",
-    "concerns.md": "",
+    "concerns_and_ideas.md": "",
     "sleep.md": "",
     "last_review.md": "",
     "reviews.md": "",
@@ -541,44 +542,80 @@ def _build_heartbeat_phases(shared_params: dict[str, float], config: dict) -> li
     """Determine which heartbeat phases to run and in what order.
 
     Uses shared behavioral parameters for probabilistic phase decisions.
-    When NN is not available, runs the fixed pipeline (think → subconscious → dream → sleep).
+    When NN is not available, runs the fixed pipeline (think → organize → subconscious → dream → sleep).
+    
+    Minimal order: [think, subconscious, dream, sleep]
+    Additional phases can be inserted between anchor phases.
     """
     nn_available = shared_params.get("_nn_available", False)
     if not nn_available:
-        return ["think", "subconscious", "dream", "sleep"]
+        return ["think", "organize", "subconscious", "dream", "create", "sleep"]
 
-    max_thinks = int(config.get("max_think_iterations", 3))
-    phases = ["think"]
-
-    # Additional think iterations with diminishing probability
+    # Extract behavioral parameters
     processing_depth = shared_params.get("processing_depth", 0.5)
-    for i in range(1, max_thinks):
-        if probabilistic(processing_depth - 0.3 * i, label=f"extra_think_{i}"):
-            phases.append("think")
-        else:
-            break
-
-    # Optional organize phase
     organization_drive = shared_params.get("organization_drive", 0.5)
-    if probabilistic(organization_drive, label="organize_phase"):
+    creative_latitude = shared_params.get("creative_latitude", 0.5)
+    
+    max_thinks = int(config.get("max_think_iterations", 10))
+    think_count = 0
+    
+    phases = []
+    
+    # Anchor: think
+    phases.append("think")
+    think_count += 1
+    
+    # Optionally add more thinking and organization
+    if think_count < max_thinks and probabilistic(processing_depth * 0.7, label="think_pre_subconscious"):
+        phases.append("think")
+        think_count += 1
+
+    if probabilistic(organization_drive * 0.6, label="organize_pre_subconscious"):
         phases.append("organize")
 
+    # Anchor: subconscious (extracts concerns from thinking+dreams)
     phases.append("subconscious")
 
-    # Optional dream phase
-    creative_latitude = shared_params.get("creative_latitude", 0.5)
-    if probabilistic(creative_latitude, label="dream_phase"):
+    # Optionally add more thinking and organization
+    if think_count < max_thinks and probabilistic(processing_depth * 0.6, label="think_pre_dream"):
+        phases.append("think")
+        think_count += 1
+    
+    if probabilistic(organization_drive * 0.5, label="organize_pre_dream"):
+        phases.append("organize")
+
+    if probabilistic(creative_latitude * 0.5, label="create_pre_dream"):
+        phases.append("create")
+    
+    # Anchor: dream (uses fresh concerns from subconscious)
+    phases.append("dream")
+    
+    # Optionally add more thinking, organization, and dreaming
+    for i in range(max_thinks - think_count):
+        if probabilistic(processing_depth * 0.5, label=f"think_pre_sleep_{i}"):
+            phases.append("think")
+            think_count += 1
+        else:
+            break
+    
+    if probabilistic(organization_drive * 0.4, label="organize_pre_sleep"):
+        phases.append("organize")
+    
+    if probabilistic(creative_latitude * 0.6, label="dream_pre_sleep"):
         phases.append("dream")
 
+    if probabilistic(creative_latitude * 0.4, label="create_pre_sleep"):
+        phases.append("create")
+
+    # Anchor: sleep (consolidates everything)
     phases.append("sleep")
+    
     return phases
 
 
 def _get_thinking_tools() -> list[dict]:
-    """Assemble tool schemas for thinking session (graph + map + organize + publish)."""
-    from library.tools.graph import GRAPH_TOOL_SCHEMAS
-    from library.tools.activation_map import MAP_TOOL_SCHEMAS
-    from library.tools.organize import ORGANIZE_TOOL_SCHEMAS
+    """Assemble tool schemas for thinking session (organize + graph + map + publish)."""
+    from library.tools.phases import THINK_SCOPES, get_tools_for_scopes
     publish_schema = {
         "type": "function",
         "function": {
@@ -597,23 +634,32 @@ def _get_thinking_tools() -> list[dict]:
             },
         },
     }
-    return GRAPH_TOOL_SCHEMAS + MAP_TOOL_SCHEMAS + ORGANIZE_TOOL_SCHEMAS + [publish_schema]
+    return get_tools_for_scopes(THINK_SCOPES, graph=True, activation_map=True) + [publish_schema]
 
 
 def _get_organize_tools() -> list[dict]:
     """Assemble tool schemas for organize session (organize + graph)."""
-    from library.tools.graph import GRAPH_TOOL_SCHEMAS
-    from library.tools.organize import ORGANIZE_TOOL_SCHEMAS
-    return ORGANIZE_TOOL_SCHEMAS + GRAPH_TOOL_SCHEMAS
+    from library.tools.phases import ORGANIZE_SCOPES, get_tools_for_scopes
+    return get_tools_for_scopes(ORGANIZE_SCOPES, graph=True)
+
+
+def _get_create_tools() -> list[dict]:
+    """Assemble tool schemas for creative session (creative + graph + map)."""
+    from library.tools.phases import CREATE_SCOPES, get_tools_for_scopes
+    return get_tools_for_scopes(CREATE_SCOPES, graph=True, activation_map=True, creative=True)
 
 
 def _run_think_phase(ctx: InstanceContext, weights: dict, variables: dict) -> None:
     """Run one think phase iteration."""
     from library.tools.patterns import thinking_session
 
-    thinking = ctx.read("thinking.md") or ""
-    concerns = ctx.read("concerns.md") or ""
-    dreams = ctx.read("dreams.md") or ""
+    # Distill the core memory files
+    memory_distilled = distill_memory(
+        ctx,
+        include=["thinking.md", "dreams.md", "concerns_and_ideas.md"],
+    )
+
+    # Keep these inputs as-is (already concise)
     sleep_output = ctx.read("sleep.md") or ""
     reviews = ctx.read("reviews.md") or ""
     rep_summary = _graph_map_summary(ctx)
@@ -625,12 +671,10 @@ def _run_think_phase(ctx: InstanceContext, weights: dict, variables: dict) -> No
     )
 
     thinking_context = _build_context(
-        ("Your Concerns", concerns),
-        ("Your Dreams", dreams),
+        ("Your Memory", memory_distilled),
         ("Your Sleep Consolidation", sleep_output),
         ("Recent Reviews", reviews),
         ("Representation State", rep_summary),
-        ("Your Current Thoughts", thinking),
     ) or "This is your first thinking session."
 
     thinking_session(
@@ -677,7 +721,7 @@ def _run_organize_phase(ctx: InstanceContext, weights: dict, variables: dict) ->
 
 
 def _run_subconscious_phase(ctx: InstanceContext, weights: dict, variables: dict) -> None:
-    """Run the subconscious phase — surfaces concerns from thinking + dreams."""
+    """Run the subconscious phase — surfaces concerns and ideas from thinking + dreams."""
     from library.tools.patterns import llm_generate
 
     subconscious_template = (_SPECIES_DIR / "prompts" / "subconscious.md").read_text()
@@ -694,11 +738,11 @@ def _run_subconscious_phase(ctx: InstanceContext, weights: dict, variables: dict
     )
 
     result = llm_generate(ctx, system=subconscious_system, content=content, max_tokens=4096)
-    ctx.write("concerns.md", result)
+    ctx.write("concerns_and_ideas.md", result)
 
 
 def _run_dream_phase(ctx: InstanceContext, weights: dict, variables: dict) -> None:
-    """Run the dream phase — associative processing from thinking + concerns."""
+    """Run the dream phase — associative processing from thinking + concerns/ideas."""
     from library.tools.patterns import llm_generate
 
     dreaming_template = (_SPECIES_DIR / "prompts" / "dreaming.md").read_text()
@@ -707,15 +751,44 @@ def _run_dream_phase(ctx: InstanceContext, weights: dict, variables: dict) -> No
         ["identity"],
     )
 
-    thinking = ctx.read("thinking.md") or ""
-    concerns = ctx.read("concerns.md") or ""
+    memory_distilled = distill_memory(
+        ctx,
+        include=["thinking.md", "dreams.md", "concerns_and_ideas.md"],
+    )
     content = _build_context(
-        ("Your Thoughts", thinking),
-        ("Your Concerns", concerns),
+        ("Your Memory", memory_distilled),
     )
 
     result = llm_generate(ctx, system=dreaming_system, content=content, max_tokens=4096)
     ctx.write("dreams.md", result)
+
+
+def _run_create_phase(ctx: InstanceContext, weights: dict, variables: dict) -> None:
+    """Run the creative phase — produce or iterate on creative artifacts."""
+    from library.tools.patterns import thinking_session
+
+    create_template = (_SPECIES_DIR / "prompts" / "create.md").read_text()
+    create_system = _inject_segments(
+        create_template, _REGISTRY, weights, variables,
+        ["identity", "meta"],
+    )
+
+    memory_distilled = distill_memory(
+        ctx,
+        include=["thinking.md", "dreams.md", "concerns_and_ideas.md"],
+    )
+
+    create_context = _build_context(
+        ("Your Memory", memory_distilled),
+    ) or "No prior context."
+
+    thinking_session(
+        ctx,
+        system=create_system,
+        initial_message=create_context,
+        max_tokens=16384,
+        extra_tools=_get_create_tools(),
+    )
 
 
 def _run_sleep_phase(ctx: InstanceContext) -> None:
@@ -725,13 +798,13 @@ def _run_sleep_phase(ctx: InstanceContext) -> None:
     sleep_system = (_SPECIES_DIR / "prompts" / "sleep.md").read_text()
 
     thinking = ctx.read("thinking.md") or ""
-    concerns = ctx.read("concerns.md") or ""
+    concerns = ctx.read("concerns_and_ideas.md") or ""
     dreams = ctx.read("dreams.md") or ""
     reviews = ctx.read("reviews.md") or ""
     prev_sleep = ctx.read("sleep.md") or ""
     content = _build_context(
         ("Your Thoughts", thinking),
-        ("Your Concerns", concerns),
+        ("Your Concerns & Ideas", concerns),
         ("Your Dreams", dreams),
         ("Session Reviews", reviews),
         ("Previous Sleep Output", prev_sleep),
@@ -793,6 +866,8 @@ def heartbeat(ctx: InstanceContext) -> None:
             _run_subconscious_phase(ctx, weights, variables)
         elif phase == "dream":
             _run_dream_phase(ctx, weights, variables)
+        elif phase == "create":
+            _run_create_phase(ctx, weights, variables)
         elif phase == "sleep":
             _run_sleep_phase(ctx)
         else:
@@ -833,8 +908,8 @@ def heartbeat(ctx: InstanceContext) -> None:
 
 def _on_message_rate_limited(
     ctx: InstanceContext,
-    events_text: str,
-    thinking: str,
+    events_distilled: str,
+    thinking_distilled: str,
     weights: dict,
     variables: dict,
     shared_params: dict,
@@ -853,16 +928,16 @@ def _on_message_rate_limited(
         ["state", "relational"],
     )
     gut_context = _build_context(
-        ("Incoming Messages", events_text),
-        ("Your Thoughts", thinking),
+        ("Incoming Messages", events_distilled),
+        ("Your Thoughts", thinking_distilled),
     )
     gut_output = llm_generate(ctx, system=gut_system, content=gut_context, max_tokens=4096)
 
     # Review phase (no reply to review, but we still assess the conversation)
     review_system = (_SPECIES_DIR / "prompts" / "review.md").read_text()
     review_context = _build_context(
-        ("Incoming Messages", events_text),
-        ("Your Thoughts", thinking),
+        ("Incoming Messages", events_distilled),
+        ("Your Thoughts", thinking_distilled),
         ("Gut Assessment", gut_output),
     )
     review = llm_generate(ctx, system=review_system, content=review_context, max_tokens=4096)
@@ -895,13 +970,18 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
     sleep_output = ctx.read("sleep.md") or ""
     rep_summary = _graph_map_summary(ctx)
 
+    # Distill contexts for efficiency
+    logger.debug("Distilling incoming messages and thinking for context")
+    events_distilled = distill_messages(ctx, events) if events else events_text
+    thinking_distilled = distill_memory(ctx, exclude=["sleep.md"]) if thinking else thinking
+
     weights, variables, shared_params = _load_weights_and_variables(ctx)
 
     # --- Rate-limited abbreviated pipeline: gut + review only ---
     rate_limited = getattr(ctx, "_reply_rate_limited", False) is True
     if rate_limited:
         logger.info("on_message rate-limited: running gut + review only (silent learning)")
-        return _on_message_rate_limited(ctx, events_text, thinking, weights, variables, shared_params)
+        return _on_message_rate_limited(ctx, events_distilled, thinking_distilled, weights, variables, shared_params)
 
     # Build system prompts with segment injection
     gut_template = (_SPECIES_DIR / "prompts" / "gut.md").read_text()
@@ -925,25 +1005,25 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
     initial_state = {
         "gut_system": gut_system,
         "gut_context": _build_context(
-            ("Incoming Messages", events_text),
-            ("Your Thoughts", thinking),
+            ("Incoming Messages", events_distilled),
+            ("Your Thoughts", thinking_distilled),
         ),
         "suggest_system": suggest_system,
         "suggest_context": _build_context(
-            ("Incoming Messages", events_text),
+            ("Incoming Messages", events_distilled),
             ("Representation State", rep_summary),
         ),
         "reply_system": reply_system,
         "reply_context": _build_context(
-            ("Incoming Messages", events_text),
-            ("Your Thoughts", thinking),
+            ("Incoming Messages", events_distilled),
+            ("Your Thoughts", thinking_distilled),
         ),
         # Review context is assembled after reply is generated — the pipeline
         # sets pipeline.response, so we can reference it. We pre-build the
         # static parts and the review stage reads the dynamic ones.
         "review_context": _build_context(
-            ("Incoming Messages", events_text),
-            ("Your Thoughts", thinking),
+            ("Incoming Messages", events_distilled),
+            ("Your Thoughts", thinking_distilled),
         ),
         "_species_dir": str(_SPECIES_DIR),
     }
