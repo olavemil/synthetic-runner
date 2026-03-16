@@ -218,6 +218,9 @@ class TestWorkerRun:
             def configure_send_policy(self, **kwargs):
                 captured["policy"] = kwargs
 
+            def track(self, *args, **kwargs):
+                pass
+
             @property
             def sent_message_count(self):
                 return self._sent
@@ -258,6 +261,9 @@ class TestWorkerRun:
             def configure_send_policy(self, **kwargs):
                 captured["policy"] = kwargs
 
+            def track(self, *args, **kwargs):
+                pass
+
             @property
             def sent_message_count(self):
                 return self._sent
@@ -287,6 +293,9 @@ class TestWorkerRun:
 
             def configure_send_policy(self, **kwargs):
                 captured["policy"] = kwargs
+
+            def track(self, *args, **kwargs):
+                pass
 
             @property
             def sent_message_count(self):
@@ -319,6 +328,9 @@ class TestWorkerRun:
 
             def configure_send_policy(self, **kwargs):
                 captured["policy"] = kwargs
+
+            def track(self, *args, **kwargs):
+                pass
 
             @property
             def sent_message_count(self):

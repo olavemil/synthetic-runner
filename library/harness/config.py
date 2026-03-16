@@ -80,6 +80,12 @@ class SyncConfig:
 
 
 @dataclass
+class AnalyticsConfig:
+    base_url: str = "http://localhost:4000"
+    api_key: str | None = None
+
+
+@dataclass
 class HarnessConfig:
     providers: list[ProviderConfig] = field(default_factory=list)
     adapters: list[AdapterConfig] = field(default_factory=list)
@@ -88,6 +94,7 @@ class HarnessConfig:
     poll_interval: int = 30
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     sync: SyncConfig = field(default_factory=SyncConfig)
+    analytics: AnalyticsConfig | None = None
 
     def get_provider(self, provider_id: str) -> ProviderConfig:
         for p in self.providers:
@@ -162,6 +169,14 @@ def load_harness_config(
         remote=sync_raw.get("remote"),
     )
 
+    analytics = None
+    if "analytics" in resolved:
+        analytics_raw = resolved["analytics"]
+        analytics = AnalyticsConfig(
+            base_url=analytics_raw.get("base_url", "http://localhost:4000"),
+            api_key=analytics_raw.get("api_key"),
+        )
+
     return HarnessConfig(
         providers=providers,
         adapters=adapters,
@@ -170,6 +185,7 @@ def load_harness_config(
         poll_interval=resolved.get("poll_interval", 30),
         scheduler=scheduler,
         sync=sync,
+        analytics=analytics,
     )
 
 

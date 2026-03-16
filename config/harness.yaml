@@ -25,3 +25,6 @@ scheduler:
 sync:
   repo: ../synthetic-space
   prefix: symbiosis
+
+analytics:
+  base_url: http://localhost:8000
