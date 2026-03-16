@@ -82,6 +82,7 @@ class SyncConfig:
 @dataclass
 class AnalyticsConfig:
     base_url: str = "http://localhost:4000"
+    api_key: str | None = None
 
 
 @dataclass
@@ -173,6 +174,7 @@ def load_harness_config(
         analytics_raw = resolved["analytics"]
         analytics = AnalyticsConfig(
             base_url=analytics_raw.get("base_url", "http://localhost:4000"),
+            api_key=analytics_raw.get("api_key"),
         )
 
     return HarnessConfig(

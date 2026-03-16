@@ -176,6 +176,72 @@ class TestAnalyticsClientSendsEvents:
         assert "real-instance-id" not in evt["analytics_user_id"]
         assert "real-session-id" not in evt["analytics_session_id"]
 
+    def test_api_key_sent_as_header(self):
+        received_headers: list[dict] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                self.rfile.read(length)
+                received_headers.append(dict(self.headers))
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        t = threading.Thread(target=server.handle_request, daemon=True)
+        t.start()
+
+        client = AnalyticsClient(
+            base_url=f"http://127.0.0.1:{port}",
+            instance_id="inst",
+            session_id="sess",
+            api_key="test-secret-key",
+        )
+        client.track("ping")
+        t.join(timeout=3)
+        server.server_close()
+
+        assert len(received_headers) == 1
+        lowered = {k.lower(): v for k, v in received_headers[0].items()}
+        assert lowered.get("x-api-key") == "test-secret-key"
+
+    def test_no_api_key_omits_header(self):
+        received_headers: list[dict] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                self.rfile.read(length)
+                received_headers.append(dict(self.headers))
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        t = threading.Thread(target=server.handle_request, daemon=True)
+        t.start()
+
+        client = AnalyticsClient(
+            base_url=f"http://127.0.0.1:{port}",
+            instance_id="inst",
+            session_id="sess",
+            api_key=None,
+        )
+        client.track("ping")
+        t.join(timeout=3)
+        server.server_close()
+
+        assert len(received_headers) == 1
+        lowered = {k.lower(): v for k, v in received_headers[0].items()}
+        assert "x-api-key" not in lowered
+
 
 # ---------------------------------------------------------------------------
 # Unit tests: InstanceContext instrumentation
@@ -356,6 +422,10 @@ class TestAnalyticsConfig:
         cfg = AnalyticsConfig()
         assert cfg.base_url == "http://localhost:4000"
 
+    def test_default_api_key_is_none(self):
+        cfg = AnalyticsConfig()
+        assert cfg.api_key is None
+
     def test_harness_config_analytics_none_by_default(self):
         cfg = HarnessConfig()
         assert cfg.analytics is None
@@ -366,12 +436,26 @@ class TestAnalyticsConfig:
         harness_yaml = tmp_path / "config" / "harness.yaml"
         harness_yaml.parent.mkdir()
         harness_yaml.write_text(
-            "providers: []\nadapters: []\nanalytics:\n  base_url: http://localhost:9000\n"
+            "providers: []\nadapters: []\nanalytics:\n  base_url: http://localhost:9000\n  api_key: secret123\n"
         )
 
         cfg = load_harness_config(harness_yaml)
         assert cfg.analytics is not None
         assert cfg.analytics.base_url == "http://localhost:9000"
+        assert cfg.analytics.api_key == "secret123"
+
+    def test_load_harness_config_with_analytics_env_key(self, tmp_path, monkeypatch):
+        from library.harness.config import load_harness_config
+
+        monkeypatch.setenv("ANALYTICS_API_KEY", "env-secret")
+        harness_yaml = tmp_path / "config" / "harness.yaml"
+        harness_yaml.parent.mkdir()
+        harness_yaml.write_text(
+            "providers: []\nadapters: []\nanalytics:\n  base_url: http://localhost:9000\n  api_key: ${ANALYTICS_API_KEY}\n"
+        )
+
+        cfg = load_harness_config(harness_yaml)
+        assert cfg.analytics.api_key == "env-secret"
 
     def test_load_harness_config_without_analytics(self, tmp_path):
         from library.harness.config import load_harness_config

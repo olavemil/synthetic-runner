@@ -29,11 +29,13 @@ class AnalyticsClient:
         base_url: str,
         instance_id: str,
         session_id: str,
+        api_key: str | None = None,
         timeout: float = 2.0,
     ):
         self._endpoint = base_url.rstrip("/") + "/api/analytics/events"
         self._analytics_user_id = _pseudonymize(instance_id)
         self._analytics_session_id = _pseudonymize(session_id)
+        self._api_key = api_key
         self._timeout = timeout
 
     def track(self, event_name: str, properties: dict | None = None) -> None:
@@ -50,10 +52,13 @@ class AnalyticsClient:
     def _send(self, event: dict) -> None:
         try:
             data = json.dumps(event).encode()
+            headers = {"Content-Type": "application/json"}
+            if self._api_key:
+                headers["X-Api-Key"] = self._api_key
             req = urllib.request.Request(
                 self._endpoint,
                 data=data,
-                headers={"Content-Type": "application/json"},
+                headers=headers,
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=self._timeout):

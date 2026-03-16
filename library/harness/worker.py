@@ -431,6 +431,7 @@ class Worker:
                 base_url=self._config.analytics.base_url,
                 instance_id=instance_config.instance_id,
                 session_id=session_id or instance_config.instance_id,
+                api_key=self._config.analytics.api_key,
             )
 
         ctx = InstanceContext(
