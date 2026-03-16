@@ -15,6 +15,9 @@ from library.tools.hecate import (
     load_config,
     load_shared_memory,
     load_voice_memory,
+    load_voice_inbox,
+    format_voice_inbox,
+    run_voice_messaging_phase,
     update_voice_subconscious,
     _build_memory_context,
 )
@@ -264,12 +267,17 @@ def heartbeat(ctx: InstanceContext) -> None:
         new_thoughts: dict[str, str] = {}
         for voice in shuffled_voices:
             others = {name: t for name, t in previous_thoughts.items() if name != voice.name}
+            # Include private inbox in voice memory so the model can see it during thinking
+            mem = dict(voice_memories[voice.name])
+            voice_inbox = load_voice_inbox(ctx, voice, cfg.voices)
+            if voice_inbox:
+                mem["private_messages"] = format_voice_inbox(voice_inbox)
             thought = think_with_context(
                 ctx,
                 voice,
                 context=iteration_context,
                 others_thinking=others if iteration > 0 else None,
-                voice_memory=voice_memories[voice.name],
+                voice_memory=mem,
             )
             new_thoughts[voice.name] = thought
 
@@ -278,6 +286,9 @@ def heartbeat(ctx: InstanceContext) -> None:
         for voice in cfg.voices:
             ctx.write(f"{voice.name.lower()}_thinking.md", new_thoughts[voice.name])
         previous_thoughts = new_thoughts
+
+    # Voice messaging phase: private voice-to-voice messages before organize
+    run_voice_messaging_phase(ctx, cfg.voices, cfg)
 
     # Organize phase: runs after all thinking iterations
     _run_organize_phase(ctx, cfg)

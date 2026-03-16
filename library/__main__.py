@@ -309,7 +309,7 @@ def _build_parser() -> argparse.ArgumentParser:
         )
         p.add_argument(
             "--log-level",
-            default="INFO",
+            default="DEBUG",
             choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         )
         p.add_argument(

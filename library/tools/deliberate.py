@@ -382,6 +382,8 @@ def think_with_context(
             parts.append(f"## Your Motivation\n{voice_memory['motivation'][-_VOICE_MEMORY_MAX_CHARS:]}")
         if voice_memory.get("thinking"):
             parts.append(f"## Your Previous Thoughts\n{voice_memory['thinking'][-_VOICE_MEMORY_MAX_CHARS:]}")
+        if voice_memory.get("private_messages"):
+            parts.append(f"## Private Messages\n{voice_memory['private_messages']}")
 
     full_context = "\n\n".join(parts)
 

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from library.tools.identity import Identity, parse_model, load_identity
@@ -10,6 +13,11 @@ from library.tools.deliberate import generate_with_identity
 
 if TYPE_CHECKING:
     from library.harness.context import InstanceContext
+
+logger = logging.getLogger(__name__)
+
+_SPECIES_DIR = Path(__file__).parent.parent / "species" / "hecate"
+_PROMPT_VOICE_MESSAGING = (_SPECIES_DIR / "prompts/voice_messaging.md").read_text()
 
 # Backward-compat alias: voices ARE Identity objects
 Voice = Identity
@@ -156,3 +164,102 @@ def update_voice_subconscious(
             "Write a brief subconscious note to yourself about how you feel and what lingers."
         )
     return generate_with_identity(ctx, identity, user_prompt, context=context)
+
+
+# ---------------------------------------------------------------------------
+# Private voice-to-voice messaging
+# ---------------------------------------------------------------------------
+
+
+def _voice_message_path(sender_name: str, recipient_name: str) -> str:
+    """Stable path for a private message from sender to recipient."""
+    return f"voice_messages/{sender_name.lower()}_{recipient_name.lower()}.md"
+
+
+def load_voice_inbox(ctx: "InstanceContext", voice: Identity, all_voices: list[Identity]) -> dict[str, str]:
+    """Load private messages for a voice — only messages where voice is sender or receiver.
+
+    Returns a dict with keys like 'To Aria' or 'From Sable' and message content as values.
+    The third voice in a trio cannot see messages between the other two.
+    """
+    messages: dict[str, str] = {}
+    for other in all_voices:
+        if other.name == voice.name:
+            continue
+        sent_path = _voice_message_path(voice.name, other.name)
+        sent = ctx.read(sent_path)
+        if sent and sent.strip():
+            messages[f"To {other.name}"] = sent.strip()
+        recv_path = _voice_message_path(other.name, voice.name)
+        recv = ctx.read(recv_path)
+        if recv and recv.strip():
+            messages[f"From {other.name}"] = recv.strip()
+    return messages
+
+
+def format_voice_inbox(inbox: dict[str, str]) -> str:
+    """Format a voice inbox dict as a readable block for prompt injection."""
+    if not inbox:
+        return ""
+    lines = ["Your private messages:"]
+    for label, msg in inbox.items():
+        lines.append(f"  [{label}]: {msg}")
+    return "\n".join(lines)
+
+
+def send_voice_message(
+    ctx: "InstanceContext",
+    sender: Identity,
+    recipient: Identity,
+    message: str,
+) -> None:
+    """Overwrite the private message from sender to recipient."""
+    path = _voice_message_path(sender.name, recipient.name)
+    ctx.write(path, message.strip())
+    logger.info(
+        "Hecate voice message from %s to %s (%d chars)",
+        sender.name, recipient.name, len(message),
+    )
+
+
+def run_voice_messaging_phase(
+    ctx: "InstanceContext",
+    voices: list[Identity],
+    cfg: HecateConfig,
+) -> int:
+    """Each voice may send one private message to another. Returns count sent."""
+    sent = 0
+    voice_names = [v.name for v in voices]
+    for voice in voices:
+        others = [v for v in voices if v.name != voice.name]
+        inbox = load_voice_inbox(ctx, voice, voices)
+        inbox_text = format_voice_inbox(inbox)
+        inbox_block = f"\n{inbox_text}\n" if inbox_text else ""
+        prompt = (
+            _PROMPT_VOICE_MESSAGING
+            .replace("{voice_name}", voice.name)
+            .replace("{others}", ", ".join(v.name for v in others))
+            .replace("{inbox_block}", inbox_block)
+        )
+        raw = generate_with_identity(
+            ctx, voice, prompt,
+            context="Hecate private voice messaging phase.",
+            max_tokens=256,
+        )
+        try:
+            cleaned = raw.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0]
+            data = json.loads(cleaned)
+            target_name = data.get("to")
+            msg = str(data.get("message", "")).strip()
+            if target_name and msg and target_name in voice_names and target_name != voice.name:
+                recipient = next((v for v in voices if v.name == target_name), None)
+                if recipient:
+                    send_voice_message(ctx, voice, recipient, msg[:300])
+                    sent += 1
+        except Exception:
+            pass
+
+    logger.info("Hecate voice messaging phase: %d messages sent", sent)
+    return sent

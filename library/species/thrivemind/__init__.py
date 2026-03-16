@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import math
+import random
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -67,6 +68,7 @@ logger = logging.getLogger(__name__)
 _SPECIES_DIR = Path(__file__).parent
 _PROMPT_CANDIDATE = (_SPECIES_DIR / "prompts/candidate.md").read_text()
 _PROMPT_RECOMPOSE = (_SPECIES_DIR / "prompts/recompose.md").read_text()
+_PROMPT_CREATE = (_SPECIES_DIR / "prompts/create.md").read_text()
 
 DEFAULT_FILES = {
     "constitution.md": "# Constitution\n",
@@ -122,6 +124,32 @@ def _run_organize_phase(ctx: InstanceContext, cfg: ThrivemindConfig) -> None:
         extra_tools=organize_tools,
     )
     logger.info("Thrivemind heartbeat: organize phase complete")
+
+
+def _run_creative_phase(ctx: InstanceContext, cfg: ThrivemindConfig) -> None:
+    """Creative expression phase: tool-use session for colony artifact creation."""
+    from library.tools.patterns import thinking_session
+    from library.tools.phases import CREATE_SCOPES, get_tools_for_scopes
+
+    create_tools = get_tools_for_scopes(CREATE_SCOPES, creative=True)
+
+    constitution = load_constitution(ctx)
+    reflection_summary = ctx.read("colony.md") or ""
+    create_context = ""
+    if constitution.strip():
+        create_context += f"## Constitution\n\n{constitution}\n\n"
+    if reflection_summary.strip():
+        create_context += f"## Colony Snapshot\n\n{reflection_summary}"
+
+    logger.info("Thrivemind heartbeat: running creative phase")
+    thinking_session(
+        ctx,
+        system=_PROMPT_CREATE,
+        initial_message=create_context.strip() or "The colony is ready to create.",
+        max_tokens=16384,
+        extra_tools=create_tools,
+    )
+    logger.info("Thrivemind heartbeat: creative phase complete")
 
 
 def on_message(ctx: InstanceContext, events: list[Event]) -> None:
@@ -312,9 +340,11 @@ def heartbeat(ctx: InstanceContext) -> None:
     colony_events = load_events(ctx)
     events_text = format_events_for_context(colony_events)
 
-    # Generate per-individual reflections
+    # Generate per-individual reflections in randomized order to prevent precedence bias
     individual_reflections: dict[str, str] = {}
-    for individual in colony:
+    shuffled_colony = list(colony)
+    random.shuffle(shuffled_colony)
+    for individual in shuffled_colony:
         prior_reflection = load_reflection(ctx, individual)
         reflection = reflect_on_colony(
             ctx, cfg, individual, colony, constitution,
@@ -434,6 +464,9 @@ def heartbeat(ctx: InstanceContext) -> None:
 
     # Organize phase: knowledge organization after constitution and spawn cycle
     _run_organize_phase(ctx, cfg)
+
+    # Creative phase: artifact creation using colony heritage
+    _run_creative_phase(ctx, cfg)
 
 
 class ThrivemindSpecies(Species):

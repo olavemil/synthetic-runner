@@ -207,6 +207,7 @@ def load_config(ctx: InstanceContext) -> ThrivemindConfig:
 
 
 def _identity_from_dict(d: dict) -> Identity:
+    parents_raw = d.get("parents", [])
     return Identity(
         name=str(d.get("name") or d.get("id", "")),
         dims={k: float(v) for k, v in d.get("dims", {}).items()},
@@ -214,6 +215,7 @@ def _identity_from_dict(d: dict) -> Identity:
         cohesion=float(d.get("cohesion", 0.0)),
         created_at=int(d.get("created_at", 0)),
         age=int(d.get("age", 0)),
+        parents=list(parents_raw) if isinstance(parents_raw, list) else [],
     )
 
 
@@ -225,6 +227,7 @@ def _identity_to_dict(ind: Identity) -> dict:
         "cohesion": ind.cohesion,
         "created_at": ind.created_at,
         "age": ind.age,
+        "parents": ind.parents,
     }
 
 
@@ -316,6 +319,29 @@ def save_reflection(ctx: InstanceContext, individual: Identity, text: str) -> No
         len(text or ""),
     )
     ctx.write(path, text)
+
+
+def load_ancestor_reflections(ctx: InstanceContext, individual: Identity) -> str:
+    """Load the last known thoughts of an individual's direct ancestors.
+
+    Checks live reflections first, then archived files for removed ancestors.
+    Returns a formatted string for inclusion in the reflection prompt, or empty string.
+    """
+    if not individual.parents:
+        return ""
+    parts = []
+    for parent_name in individual.parents:
+        # Live reflection
+        reflection = ctx.read(_reflection_path(parent_name))
+        if not reflection:
+            # Archived (parent was removed from colony)
+            reflection = ctx.read(f"removed/{quote(parent_name, safe='-_.,')}.md")
+        if reflection and reflection.strip():
+            trimmed = reflection.strip()[:600]
+            parts.append(f"### {parent_name}\n{trimmed}")
+    if not parts:
+        return ""
+    return "## Ancestral Thoughts\n\n" + "\n\n".join(parts)
 
 
 def summarize_message_history(
@@ -437,7 +463,14 @@ def reflect_on_colony(
     )
     age_label = _relative_age_label(individual, colony)
     age_block = f"\nYou are {age_label} in the colony (age={individual.age}, colony average={sum(i.age for i in colony)/len(colony):.1f}).\n" if colony else ""
-    prompt = _PROMPT_REFLECT.replace("{age_block}", age_block)
+    ancestry_block = ""
+    if individual.parents:
+        ancestry_text = load_ancestor_reflections(ctx, individual)
+        parents_str = " and ".join(individual.parents)
+        ancestry_block = f"\nYou are the offspring of {parents_str}.\n"
+        if ancestry_text:
+            ancestry_block += f"\n{ancestry_text}\n"
+    prompt = _PROMPT_REFLECT.replace("{age_block}", age_block).replace("{ancestry_block}", ancestry_block)
     reflection = generate_with_identity(
         ctx,
         individual,
@@ -980,7 +1013,8 @@ def _make_offspring(
             offspring_dims[name] = primary.dims.get(name, 0.0) if primary.dims else 0.0
     child_name = _generate_name(rng, existing_names)
     existing_names.add(child_name)
-    return Identity(name=child_name, dims=offspring_dims, approval=0, cohesion=0.0, created_at=now)
+    return Identity(name=child_name, dims=offspring_dims, approval=0, cohesion=0.0, created_at=now,
+                    parents=[primary.name, other.name])
 
 
 def run_spawn_cycle(

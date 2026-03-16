@@ -37,6 +37,7 @@ class Identity:
     approval: int = 0
     created_at: int = field(default_factory=lambda: int(time.time()))
     age: int = 0  # number of thinking sessions since spawn
+    parents: list[str] = field(default_factory=list)  # parent names for colony individuals
 
 
 def format_persona(identity: Identity) -> str:
@@ -94,6 +95,8 @@ def load_identity(raw: dict) -> Identity:
     name = str(raw.get("name") or raw.get("id", ""))
     dims_raw = raw.get("dims")
     dims = {k: float(v) for k, v in dims_raw.items()} if dims_raw else None
+    parents_raw = raw.get("parents", [])
+    parents = list(parents_raw) if isinstance(parents_raw, list) else []
     return Identity(
         name=name,
         model=model,
@@ -104,4 +107,5 @@ def load_identity(raw: dict) -> Identity:
         approval=int(raw.get("approval", 0)),
         created_at=int(raw.get("created_at", int(time.time()))),
         age=int(raw.get("age", 0)),
+        parents=parents,
     )
