@@ -10,6 +10,7 @@ from library.harness.store import NamespacedStore, StoreDB
 from library.harness.mailbox import Mailbox
 
 if TYPE_CHECKING:
+    from library.harness.analytics import AnalyticsClient
     from library.harness.providers import LLMProvider, LLMResponse
     from library.harness.adapters import Event, MessagingAdapter
     from library.harness.config import InstanceConfig
@@ -30,6 +31,7 @@ class InstanceContext:
         store_db: StoreDB,
         mailbox: Mailbox,
         instance_config: InstanceConfig,
+        analytics: AnalyticsClient | None = None,
     ):
         self._instance_id = instance_id
         self._species_id = species_id
@@ -41,6 +43,7 @@ class InstanceContext:
         self._store_db = store_db
         self._mailbox = mailbox
         self._instance_config = instance_config
+        self._analytics = analytics
         self._send_allowed = True
         self._send_max: int | None = None
         self._send_reason = ""
@@ -57,10 +60,15 @@ class InstanceContext:
     # --- Storage ---
 
     def read(self, path: str) -> str:
-        return self._storage.read(path)
+        result = self._storage.read(path)
+        if self._analytics is not None:
+            self._analytics.track("file_read", {"path": path})
+        return result
 
     def write(self, path: str, content: str) -> None:
         self._storage.write(path, content)
+        if self._analytics is not None:
+            self._analytics.track("file_written", {"path": path, "length": len(content)})
 
     def list(self, prefix: str = "") -> list[str]:
         return self._storage.list(prefix)
@@ -69,10 +77,15 @@ class InstanceContext:
         return self._storage.exists(path)
 
     def read_binary(self, path: str) -> bytes | None:
-        return self._storage.read_binary(path)
+        result = self._storage.read_binary(path)
+        if self._analytics is not None:
+            self._analytics.track("file_read", {"path": path, "binary": True})
+        return result
 
     def write_binary(self, path: str, data: bytes) -> None:
         self._storage.write_binary(path, data)
+        if self._analytics is not None:
+            self._analytics.track("file_written", {"path": path, "size": len(data), "binary": True})
 
     # --- Config (read-only) ---
 
@@ -158,6 +171,17 @@ class InstanceContext:
                         )
 
             # Response is good or we're out of retries
+            if self._analytics is not None:
+                self._analytics.track("llm_called", {
+                    "model": model or self._default_model,
+                    "caller": caller,
+                    "finish_reason": response.finish_reason,
+                    "prompt_tokens": response.usage.get("input_tokens") or response.usage.get("prompt_tokens"),
+                    "completion_tokens": response.usage.get("output_tokens") or response.usage.get("completion_tokens"),
+                    "tool_call_count": len(response.tool_calls),
+                })
+                for tc in response.tool_calls:
+                    self._analytics.track("tool_called", {"tool_name": tc.name, "caller": caller})
             return response
 
         # Should not reach here
@@ -250,16 +274,28 @@ class InstanceContext:
             resolved_space = fallback_handle
         event_id = self._adapter.send(resolved_space, message, reply_to)
         self._send_count += 1
-        
+
         # Reset thinks counter after successful send
         self._reset_thinks_counter()
-        
+
+        if self._analytics is not None:
+            self._analytics.track("message_sent", {
+                "space": space,
+                "has_reply_to": reply_to is not None,
+            })
+
         return event_id
 
     def poll(self, space: str, since_token: str | None = None) -> tuple[list[Event], str]:
         if self._adapter is None:
             raise RuntimeError(f"No messaging adapter configured for instance '{self._instance_id}'")
-        return self._adapter.poll(self._resolve_space(space), since_token)
+        events, next_token = self._adapter.poll(self._resolve_space(space), since_token)
+        if self._analytics is not None:
+            self._analytics.track("messages_polled", {
+                "space": space,
+                "event_count": len(events),
+            })
+        return events, next_token
 
     def get_space_context(self, space: str) -> dict:
         if self._adapter is None:
@@ -313,6 +349,15 @@ class InstanceContext:
 
     def shared_store(self, namespace: str) -> NamespacedStore:
         return NamespacedStore(self._store_db, f"species:{self._species_id}:{namespace}")
+
+    # --- Config summary ---
+
+    # --- Analytics ---
+
+    def track(self, event_name: str, properties: dict | None = None) -> None:
+        """Track an analytics event if an analytics client is configured."""
+        if self._analytics is not None:
+            self._analytics.track(event_name, properties)
 
     # --- Config summary ---
 

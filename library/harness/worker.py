@@ -133,7 +133,7 @@ class Worker:
         ctx: InstanceContext | None = None
         try:
             config = self._registry.get_instance_config(job.instance_id)
-            ctx = self._build_context(config)
+            ctx = self._build_context(config, session_id=job.job_id)
             payload = dict(job.payload or {})
             entry_points = payload.pop("entry_points", [job.entry_point])
 
@@ -176,11 +176,28 @@ class Worker:
                     heartbeat_gate_used = heartbeat_gate_used_phase
                     heartbeat_external_count = heartbeat_external_count_phase
 
+                phase_props = {
+                    "phase": ep_name,
+                    "pending_messages": len(inbox_events),
+                }
+                ctx.track("phase_started", phase_props)
                 logger.info(
                     "Running phase %s.%s (job %s)",
                     job.instance_id, ep_name, job.job_id,
                 )
-                handler(ctx, **ep_payload)
+                sends_before = ctx.sent_message_count
+                phase_success = True
+                try:
+                    handler(ctx, **ep_payload)
+                except Exception:
+                    phase_success = False
+                    raise
+                finally:
+                    ctx.track("phase_completed", {
+                        **phase_props,
+                        "success": phase_success,
+                        "messages_sent": ctx.sent_message_count - sends_before,
+                    })
                 logger.info(
                     "Completed phase %s.%s (job %s)",
                     job.instance_id, ep_name, job.job_id,
@@ -385,7 +402,7 @@ class Worker:
     # Context construction
     # ------------------------------------------------------------------
 
-    def _build_context(self, instance_config) -> InstanceContext:
+    def _build_context(self, instance_config, *, session_id: str | None = None) -> InstanceContext:
         storage = NamespacedStorage(
             self._base_dir / self._config.storage_dir,
             instance_config.instance_id,
@@ -407,6 +424,15 @@ class Worker:
             instance_config.instance_id,
         )
 
+        analytics = None
+        if self._config.analytics is not None:
+            from library.harness.analytics import AnalyticsClient
+            analytics = AnalyticsClient(
+                base_url=self._config.analytics.base_url,
+                instance_id=instance_config.instance_id,
+                session_id=session_id or instance_config.instance_id,
+            )
+
         ctx = InstanceContext(
             instance_id=instance_config.instance_id,
             species_id=instance_config.species,
@@ -418,6 +444,7 @@ class Worker:
             store_db=self._store_db,
             mailbox=mailbox,
             instance_config=instance_config,
+            analytics=analytics,
         )
         ctx._sync_config = self._config.sync
         return ctx
