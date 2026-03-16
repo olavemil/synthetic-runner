@@ -520,7 +520,7 @@ class TestAnalyticsLogging:
         server.server_close()
         assert any("ping" in r.message and "sent" in r.message for r in caplog.records)
 
-    def test_logs_debug_on_failure(self, caplog):
+    def test_logs_debug_on_connection_failure(self, caplog):
         import logging
 
         client = AnalyticsClient(
@@ -534,6 +534,38 @@ class TestAnalyticsLogging:
             time.sleep(0.3)
 
         assert any("not delivered" in r.message for r in caplog.records)
+
+    def test_logs_http_status_on_http_error(self, caplog):
+        import logging
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", 0))
+                self.rfile.read(length)
+                self.send_response(401)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        port = server.server_address[1]
+        t = threading.Thread(target=server.handle_request, daemon=True)
+        t.start()
+
+        client = AnalyticsClient(
+            base_url=f"http://127.0.0.1:{port}",
+            instance_id="inst",
+            session_id="sess",
+        )
+        with caplog.at_level(logging.DEBUG, logger="library.harness.analytics"):
+            client.track("ping")
+            t.join(timeout=3)
+            time.sleep(0.1)
+
+        server.server_close()
+        assert any("HTTP 401" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
