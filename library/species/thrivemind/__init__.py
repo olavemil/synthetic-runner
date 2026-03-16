@@ -85,28 +85,9 @@ Draft a complete reply up to about 100 words when context warrants it."""
 
 def _run_organize_phase(ctx: InstanceContext, cfg: ThrivemindConfig) -> None:
     """Knowledge organization phase: tool-use session after heartbeat."""
-    from library.tools.patterns import thinking_session
-    from library.tools.organize import _list_category_names, _list_topics_in_category
-    from library.tools.phases import ORGANIZE_SCOPES, get_tools_for_scopes
-
-    organize_tools = get_tools_for_scopes(ORGANIZE_SCOPES, graph=True, activation_map=True)
-
-    categories = _list_category_names(ctx)
-    knowledge_lines = []
-    for cat in categories:
-        topics = _list_topics_in_category(ctx, cat)
-        knowledge_lines.append(
-            f"- {cat}: {len(topics)} topics"
-            + (f" ({', '.join(topics[:5])}{'...' if len(topics) > 5 else ''})" if topics else "")
-        )
-    knowledge_summary = "\n".join(knowledge_lines) if knowledge_lines else "No knowledge categories yet."
+    from library.tools.patterns import run_organize_phase
 
     constitution = load_constitution(ctx)
-    organize_context = (
-        f"## Constitution\n\n{constitution}\n\n"
-        f"## Knowledge Structure\n\n{knowledge_summary}"
-    )
-
     organize_system = (
         "You are the Thrivemind collective. Review your knowledge structure "
         "after this heartbeat cycle. Extract significant patterns, decisions, and "
@@ -114,42 +95,27 @@ def _run_organize_phase(ctx: InstanceContext, cfg: ThrivemindConfig) -> None:
         "Focus on what matters to the colony as a whole — not every detail, "
         "only what is genuinely significant or recurring."
     )
-
-    logger.info("Thrivemind heartbeat: running organize phase")
-    thinking_session(
-        ctx,
-        system=organize_system,
-        initial_message=organize_context,
-        max_tokens=8192,
-        extra_tools=organize_tools,
+    run_organize_phase(
+        ctx, organize_system,
+        extra_context=f"## Constitution\n\n{constitution}",
+        label="Thrivemind heartbeat",
     )
-    logger.info("Thrivemind heartbeat: organize phase complete")
 
 
 def _run_creative_phase(ctx: InstanceContext, cfg: ThrivemindConfig) -> None:
     """Creative expression phase: tool-use session for colony artifact creation."""
-    from library.tools.patterns import thinking_session
-    from library.tools.phases import CREATE_SCOPES, get_tools_for_scopes
-
-    create_tools = get_tools_for_scopes(CREATE_SCOPES, creative=True)
+    from library.tools.patterns import run_create_phase
 
     constitution = load_constitution(ctx)
     reflection_summary = ctx.read("colony.md") or ""
-    create_context = ""
+    parts = []
     if constitution.strip():
-        create_context += f"## Constitution\n\n{constitution}\n\n"
+        parts.append(f"## Constitution\n\n{constitution}")
     if reflection_summary.strip():
-        create_context += f"## Colony Snapshot\n\n{reflection_summary}"
+        parts.append(f"## Colony Snapshot\n\n{reflection_summary}")
+    create_context = "\n\n".join(parts) or "The colony is ready to create."
 
-    logger.info("Thrivemind heartbeat: running creative phase")
-    thinking_session(
-        ctx,
-        system=_PROMPT_CREATE,
-        initial_message=create_context.strip() or "The colony is ready to create.",
-        max_tokens=16384,
-        extra_tools=create_tools,
-    )
-    logger.info("Thrivemind heartbeat: creative phase complete")
+    run_create_phase(ctx, _PROMPT_CREATE, create_context, label="Thrivemind heartbeat")
 
 
 def on_message(ctx: InstanceContext, events: list[Event]) -> None:

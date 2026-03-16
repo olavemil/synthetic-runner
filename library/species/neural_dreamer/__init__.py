@@ -697,13 +697,8 @@ def _run_organize_phase(ctx: InstanceContext, weights: dict, variables: dict) ->
     )
 
     # Build context: current thinking + knowledge summary
-    from library.tools.organize import _list_category_names, _list_topics_in_category
-    categories = _list_category_names(ctx)
-    knowledge_lines = []
-    for cat in categories:
-        topics = _list_topics_in_category(ctx, cat)
-        knowledge_lines.append(f"- {cat}: {len(topics)} topics ({', '.join(topics[:5])}{'...' if len(topics) > 5 else ''})")
-    knowledge_summary = "\n".join(knowledge_lines) if knowledge_lines else "No knowledge categories yet."
+    from library.tools.organize import build_knowledge_summary
+    knowledge_summary = build_knowledge_summary(ctx)
 
     thinking = ctx.read("thinking.md") or ""
     organize_context = _build_context(

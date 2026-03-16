@@ -623,6 +623,56 @@ def thinking_session(
             break
 
 
+def run_organize_phase(
+    ctx: InstanceContext,
+    system: str,
+    *,
+    extra_context: str = "",
+    graph: bool = True,
+    activation_map: bool = True,
+    max_tokens: int = 8192,
+    label: str = "species",
+) -> None:
+    """Run a knowledge organization phase with organize + optional graph/map tools.
+
+    Automatically builds and appends the knowledge structure summary to the initial message.
+    `extra_context` (e.g. current thoughts, constitution) is prepended before the summary.
+    """
+    from library.tools.organize import build_knowledge_summary
+    from library.tools.phases import ORGANIZE_SCOPES, get_tools_for_scopes
+
+    knowledge_summary = build_knowledge_summary(ctx)
+    parts = []
+    if extra_context:
+        parts.append(extra_context)
+    parts.append(f"## Knowledge Structure\n\n{knowledge_summary}")
+    initial_message = "\n\n".join(parts)
+
+    organize_tools = get_tools_for_scopes(ORGANIZE_SCOPES, graph=graph, activation_map=activation_map)
+    logger.info("%s: running organize phase", label)
+    thinking_session(ctx, system=system, initial_message=initial_message, max_tokens=max_tokens,
+                     extra_tools=organize_tools)
+    logger.info("%s: organize phase complete", label)
+
+
+def run_create_phase(
+    ctx: InstanceContext,
+    system: str,
+    initial_message: str,
+    *,
+    max_tokens: int = 16384,
+    label: str = "species",
+) -> None:
+    """Run a creative artifact phase with create-scope tools."""
+    from library.tools.phases import CREATE_SCOPES, get_tools_for_scopes
+
+    create_tools = get_tools_for_scopes(CREATE_SCOPES, creative=True)
+    logger.info("%s: running create phase", label)
+    thinking_session(ctx, system=system, initial_message=initial_message, max_tokens=max_tokens,
+                     extra_tools=create_tools)
+    logger.info("%s: create phase complete", label)
+
+
 def format_context(
     ctx: InstanceContext,
     sections: list,

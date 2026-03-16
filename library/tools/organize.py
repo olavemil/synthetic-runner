@@ -224,6 +224,21 @@ def count_all_topics(ctx: InstanceContext) -> int:
     return total
 
 
+def build_knowledge_summary(ctx: InstanceContext) -> str:
+    """Build a concise human-readable knowledge structure summary for prompt injection."""
+    categories = _list_category_names(ctx)
+    if not categories:
+        return "No knowledge categories yet."
+    lines = []
+    for cat in categories:
+        topics = _list_topics_in_category(ctx, cat)
+        line = f"- {cat}: {len(topics)} topics"
+        if topics:
+            line += f" ({', '.join(topics[:5])}{'...' if len(topics) > 5 else ''})"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def _list_archive_labels(ctx: InstanceContext) -> list[str]:
     """List archive entry labels (filenames without .md)."""
     all_files = ctx.list("archive/")

@@ -165,33 +165,12 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
 
 def _run_organize_phase(ctx: InstanceContext, cfg: "HecateConfig") -> None:
     """Knowledge organization phase: tool-use session with organize + graph + map tools."""
-    from library.tools.patterns import thinking_session
-    from library.tools.organize import _list_category_names, _list_topics_in_category
-    from library.tools.phases import ORGANIZE_SCOPES, get_tools_for_scopes
-
-    organize_tools = get_tools_for_scopes(ORGANIZE_SCOPES, graph=True, activation_map=True)
-
-    # Build context: combined voice thoughts + knowledge summary
-    categories = _list_category_names(ctx)
-    knowledge_lines = []
-    for cat in categories:
-        topics = _list_topics_in_category(ctx, cat)
-        knowledge_lines.append(
-            f"- {cat}: {len(topics)} topics"
-            + (f" ({', '.join(topics[:5])}{'...' if len(topics) > 5 else ''})" if topics else "")
-        )
-    knowledge_summary = "\n".join(knowledge_lines) if knowledge_lines else "No knowledge categories yet."
+    from library.tools.patterns import run_organize_phase
 
     voice_thoughts = "\n\n".join(
         f"### {voice.name}\n{ctx.read(f'{voice.name.lower()}_thinking.md') or '(no thoughts yet)'}"
         for voice in cfg.voices
     )
-
-    organize_context = (
-        f"## Current Voice Thoughts\n\n{voice_thoughts}\n\n"
-        f"## Knowledge Structure\n\n{knowledge_summary}"
-    )
-
     organize_system = (
         "You have access to the accumulated thoughts of your three voices and a knowledge organization system.\n\n"
         "Review the recent thinking and decide what, if anything, should be:\n"
@@ -202,24 +181,16 @@ def _run_organize_phase(ctx: InstanceContext, cfg: "HecateConfig") -> None:
         "has emerged across multiple voices. Your knowledge structure should reflect how "
         "the collective actually thinks about things, not an imposed taxonomy."
     )
-
-    logger.info("Hecate heartbeat: running organize phase")
-    thinking_session(
-        ctx,
-        system=organize_system,
-        initial_message=organize_context,
-        max_tokens=8192,
-        extra_tools=organize_tools,
+    run_organize_phase(
+        ctx, organize_system,
+        extra_context=f"## Current Voice Thoughts\n\n{voice_thoughts}",
+        label="Hecate heartbeat",
     )
-    logger.info("Hecate heartbeat: organize phase complete")
 
 
 def _run_create_phase(ctx: InstanceContext, cfg: "HecateConfig") -> None:
     """Creative phase: tool-use session with creative artifact tools."""
-    from library.tools.patterns import thinking_session
-    from library.tools.phases import CREATE_SCOPES, get_tools_for_scopes
-
-    create_tools = get_tools_for_scopes(CREATE_SCOPES, creative=True)
+    from library.tools.patterns import run_create_phase
 
     voice_thoughts = "\n\n".join(
         f"### {voice.name}\n{ctx.read(f'{voice.name.lower()}_thinking.md') or '(no thoughts yet)'}"
@@ -230,15 +201,7 @@ def _run_create_phase(ctx: InstanceContext, cfg: "HecateConfig") -> None:
     if dreams.strip():
         create_context += f"\n\n## Dreams\n\n{dreams}"
 
-    logger.info("Hecate heartbeat: running create phase")
-    thinking_session(
-        ctx,
-        system=_CREATE_PROMPT,
-        initial_message=create_context,
-        max_tokens=16384,
-        extra_tools=create_tools,
-    )
-    logger.info("Hecate heartbeat: create phase complete")
+    run_create_phase(ctx, _CREATE_PROMPT, create_context, label="Hecate heartbeat")
 
 
 def heartbeat(ctx: InstanceContext) -> None:
