@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import threading
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
@@ -64,6 +65,13 @@ class AnalyticsClient:
             with urllib.request.urlopen(req, timeout=self._timeout):
                 pass
             logger.debug("Analytics event sent: %s", event["event_name"])
+        except urllib.error.HTTPError as exc:
+            logger.debug(
+                "Analytics event not delivered (HTTP %d %s): %s",
+                exc.code,
+                exc.reason,
+                event["event_name"],
+            )
         except Exception as exc:
             logger.debug(
                 "Analytics event not delivered (%s): %s",

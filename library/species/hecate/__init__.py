@@ -296,6 +296,13 @@ def heartbeat(ctx: InstanceContext) -> None:
     # Creative phase: runs after organize
     _run_create_phase(ctx, cfg)
 
+    # Render and publish creations gallery (and graph/map if present)
+    try:
+        from library.publish import render_and_publish
+        render_and_publish(ctx)
+    except Exception as exc:
+        logger.warning("Post-heartbeat render failed: %s", exc)
+
 
 class HecateSpecies(Species):
     def manifest(self) -> SpeciesManifest:

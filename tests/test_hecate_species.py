@@ -29,6 +29,7 @@ class DummyCtx:
         }
         self.sent: list[tuple[str, str]] = []
         self._llm_fn = llm_fn
+        self.instance_id = "test-hecate"
 
     def config(self, key: str):
         if key == "hecate":
@@ -375,3 +376,39 @@ class TestHecateCreatePhase:
 
         assert "creations/three-voices.md" in ctx._files
         assert "We speak as one" in ctx._files["creations/three-voices.md"]
+
+    def test_heartbeat_publishes_creations_html_after_create_phase(self):
+        """Heartbeat should render and publish creations.html after the create phase."""
+        from library.harness.providers import LLMResponse, ToolCall
+
+        create_turn = [0]
+
+        def llm_fn(messages, **kwargs):
+            tools = kwargs.get("tools", [])
+            tool_names = [t["function"]["name"] for t in tools]
+            if "creative_list" in tool_names:
+                turn = create_turn[0]
+                create_turn[0] += 1
+                if turn == 0:
+                    return LLMResponse(message="", tool_calls=[
+                        ToolCall(id="t1", name="creative_new", arguments={
+                            "type": "poetry",
+                            "title": "Three Voices",
+                            "content": "We speak as one\nyet think apart.",
+                        }),
+                    ])
+                else:
+                    return LLMResponse(message="", tool_calls=[
+                        ToolCall(id="t2", name="done", arguments={}),
+                    ])
+            if "organize_list_categories" in tool_names:
+                return LLMResponse(message="", tool_calls=[
+                    ToolCall(id="t3", name="done", arguments={}),
+                ])
+            return LLMResponse(message="voice thought", tool_calls=[])
+
+        ctx = DummyCtx(THREE_VOICES_CFG, llm_fn=llm_fn)
+        heartbeat(ctx)
+
+        assert "_published/creations.html" in ctx._files
+        assert "Three Voices" in ctx._files["_published/creations.html"]
