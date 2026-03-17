@@ -474,7 +474,8 @@ class TestCheckerReactive:
         assert "$1" in event_ids
         assert "$2" in event_ids
 
-    def test_poll_instance_skips_reactive_events_when_entity_id_unknown(self, caplog):
+    def test_poll_instance_uses_fallback_when_entity_id_unknown(self, caplog):
+        """When entity_id lookup fails, use instance_id as fallback to allow reactive events."""
         db = open_store()
         species = _make_species(schedule="* * * * *")
         instance = _make_instance(with_messaging=True, entity_id="")
@@ -492,7 +493,7 @@ class TestCheckerReactive:
 
         evt = Event(
             event_id="$evt1",
-            sender="@someone:matrix.org",
+            sender="@someone:matrix.org",  # Different from fallback "inst-1"
             body="hello",
             timestamp=1,
             room="!room:matrix.org",
@@ -506,14 +507,16 @@ class TestCheckerReactive:
                 got_messages_1, enqueued_1 = checker._poll_instance(instance)
                 got_messages_2, enqueued_2 = checker._poll_instance(instance)
 
+        # First poll is initial sync
         assert got_messages_1 is False
         assert enqueued_1 is False
-        assert got_messages_2 is False
-        assert enqueued_2 is False
-        assert queue.pending_count() == 0
+        # Second poll uses fallback entity_id and processes event
+        assert got_messages_2 is True
+        assert enqueued_2 is True
+        assert queue.pending_count() == 1
+        # Warning mentions fallback
         messages = [r.getMessage() for r in caplog.records]
-        assert any("No entity_id configured for inst-1" in m for m in messages)
-        assert any("Skipping reactive events for inst-1/main" in m for m in messages)
+        assert any("using instance_id 'inst-1' as fallback" in m for m in messages)
 
     def test_poll_instance_timeout_is_logged_without_exception_trace(self, caplog):
         db = open_store()

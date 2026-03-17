@@ -28,7 +28,7 @@ class TestEnqueue:
         first = queue.enqueue("inst-a", "on_message", {})
         second = queue.enqueue("inst-a", "heartbeat", {})
         assert first is not None
-        assert second is None  # blocked by active job
+        assert second == first  # accumulates into same job
 
     def test_enqueue_different_instances(self, queue):
         j1 = queue.enqueue("inst-a", "on_message", {})
@@ -46,6 +46,9 @@ class TestClaimNext:
         job = queue.claim_next("worker-1")
         assert job is not None
         assert job.instance_id == "inst-a"
+        assert len(job.triggers) == 1
+        assert job.triggers[0].cause == "on_message"
+        # Compatibility properties
         assert job.entry_point == "on_message"
 
     def test_claim_returns_none_when_empty(self, queue):
@@ -129,10 +132,12 @@ class TestMergeIntoPending:
         assert merged is True
 
         job = queue.claim_next("worker-1")
-        assert "on_message" in job.payload["entry_points"]
-        assert "heartbeat" in job.payload["entry_points"]
-        assert job.payload["heartbeat"] is True
-        assert len(job.payload["events"]) == 1
+        # Should have 2 triggers now
+        assert len(job.triggers) == 2
+        assert job.triggers[0].cause == "on_message"
+        assert job.triggers[1].cause == "heartbeat"
+        assert job.triggers[0].payload["events"][0]["body"] == "hi"
+        assert job.triggers[1].payload["heartbeat"] is True
 
     def test_merge_events_into_pending_heartbeat(self, queue):
         queue.enqueue("inst-a", "heartbeat", {"heartbeat": True})
@@ -142,18 +147,23 @@ class TestMergeIntoPending:
         assert merged is True
 
         job = queue.claim_next("worker-1")
-        assert "heartbeat" in job.payload["entry_points"]
-        assert "on_message" in job.payload["entry_points"]
-        assert len(job.payload["events"]) == 1
+        # Should have 2 triggers
+        assert len(job.triggers) == 2
+        assert job.triggers[0].cause == "heartbeat"
+        assert job.triggers[1].cause == "on_message"
+        assert job.triggers[1].payload["events"][0]["body"] == "hello"
 
     def test_merge_appends_events(self, queue):
         queue.enqueue("inst-a", "on_message", {"events": [{"body": "first"}]})
         queue.merge_into_pending("inst-a", "on_message", {"events": [{"body": "second"}]})
 
         job = queue.claim_next("worker-1")
-        assert len(job.payload["events"]) == 2
-        assert job.payload["events"][0]["body"] == "first"
-        assert job.payload["events"][1]["body"] == "second"
+        # Should have 2 on_message triggers
+        assert len(job.triggers) == 2
+        assert job.triggers[0].cause == "on_message"
+        assert job.triggers[1].cause == "on_message"
+        assert job.triggers[0].payload["events"][0]["body"] == "first"
+        assert job.triggers[1].payload["events"][0]["body"] == "second"
 
     def test_merge_fails_when_no_active_job(self, queue):
         merged = queue.merge_into_pending("inst-a", "heartbeat", {"heartbeat": True})
@@ -170,7 +180,9 @@ class TestMergeIntoPending:
         queue.merge_into_pending("inst-a", "on_message", {"events": [{"body": "again"}]})
 
         job = queue.claim_next("worker-1")
-        assert job.payload["entry_points"].count("on_message") == 1
+        # Both triggers have cause on_message (duplicates are allowed, worker handles dedup)
+        assert len(job.triggers) == 2
+        assert all(t.cause == "on_message" for t in job.triggers)
 
     def test_is_running(self, queue):
         assert not queue.is_running("inst-a")

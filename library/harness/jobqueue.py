@@ -14,27 +14,44 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class Trigger:
+    """A single work trigger for an instance - either message arrival or scheduled heartbeat."""
+    timestamp: float       # when this work was triggered
+    cause: str            # "on_message" or "heartbeat" or other entry point name
+    payload: dict = field(default_factory=dict)  # events, etc.
+
+
+@dataclass
 class Job:
-    job_id: str        # sortable: "{timestamp_us:020d}:{uuid4}"
+    job_id: str           # sortable: earliest trigger timestamp + uuid
     instance_id: str
-    entry_point: str   # primary entry point (kept for logging/compat)
-    payload: dict
-    created_at: float
+    triggers: list[Trigger] = field(default_factory=list)
+    created_at: float = 0.0  # timestamp of earliest trigger
+
+    @property
+    def entry_point(self) -> str:
+        """Primary entry point for logging/compat - first trigger's cause."""
+        return self.triggers[0].cause if self.triggers else "unknown"
+
+    @property
+    def payload(self) -> dict:
+        """Legacy payload accessor - merged from all triggers."""
+        merged = {}
+        for trigger in self.triggers:
+            merged.update(trigger.payload)
+        return merged
 
 
 class JobQueue:
     """
-    Manages pending/running jobs with two invariants:
-    - At most one pending-or-running job per instance (instance guard).
-    - Jobs within the same instance are processed in enqueue order.
+    Job queue with trigger accumulation.
 
-    Payload convention for merged jobs:
-      - "events": list[dict]     — present when on_message work is due
-      - "heartbeat": True        — present when heartbeat work is due
-      - "entry_points": list[str] — ordered list of entry points to run
+    Each instance has at most one job entry (pending or running).
+    Work accumulates as triggers in the job's triggers list.
+    When claimed, worker receives all accumulated triggers.
 
     Storage layout (NamespacedStore):
-      jobs namespace:   job_id -> {instance_id, entry_point, payload, created_at}
+      jobs namespace:   job_id -> {instance_id, triggers: [{timestamp, cause, payload}], created_at}
       guards namespace: instance_id -> job_id  (owner = worker_id while running)
     """
 
@@ -46,31 +63,101 @@ class JobQueue:
         self._guards = NamespacedStore(db, self._GUARDS_NS)
 
     # ------------------------------------------------------------------
+    # Migration helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _migrate_job_data(data: dict) -> list[Trigger]:
+        """Convert old job format (entry_point, payload) to new format (triggers).
+        
+        Returns list of Trigger objects, handling both old and new storage formats.
+        """
+        # New format: triggers list already present
+        if "triggers" in data:
+            trigger_dicts = data["triggers"]
+            return [
+                Trigger(
+                    timestamp=t["timestamp"],
+                    cause=t["cause"],
+                    payload=t.get("payload", {})
+                )
+                for t in trigger_dicts
+            ]
+        
+        # Old format: migrate from entry_point + payload
+        entry_point = data.get("entry_point", "on_message")
+        payload = data.get("payload", {})
+        created_at = data.get("created_at", time.time())
+        
+        # Extract entry_points list if present (from old merge logic)
+        entry_points = payload.get("entry_points", [entry_point])
+        if not isinstance(entry_points, list):
+            entry_points = [entry_point]
+        
+        # Create one trigger per entry point
+        triggers = []
+        for ep in entry_points:
+            triggers.append(Trigger(
+                timestamp=created_at,
+                cause=ep,
+                payload=payload.copy()  # each gets a copy of the full payload
+            ))
+        
+        return triggers
+
+    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def enqueue(self, instance_id: str, entry_point: str, payload: dict | None = None) -> str | None:
+    def enqueue(self, instance_id: str, entry_point: str, payload: dict | None = None) -> str:
         """
-        Enqueue a job for instance_id/entry_point.
+        Add work for instance_id/entry_point.
 
-        Returns the new job_id, or None if the instance already has an
-        active (pending or running) job.
+        If instance already has a job (pending or running), adds a new trigger.
+        Otherwise creates a new job with one trigger.
+
+        Always returns a job_id (existing or new).
         """
-        if self.has_active(instance_id):
-            return None
+        now = time.time()
+        trigger = Trigger(timestamp=now, cause=entry_point, payload=payload or {})
 
-        job_id = self._make_job_id()
-        final_payload = payload or {}
-        final_payload.setdefault("entry_points", [entry_point])
+        # Check if instance already has a job
+        existing_job_id = self._guards.get(instance_id)
+        if existing_job_id:
+            # Add trigger to existing job
+            data = self._jobs.get(existing_job_id)
+            if data:
+                triggers = data.get("triggers", [])
+                triggers.append({
+                    "timestamp": trigger.timestamp,
+                    "cause": trigger.cause,
+                    "payload": trigger.payload
+                })
+                data["triggers"] = triggers
+                self._jobs.put(existing_job_id, data)
+                logger.debug(
+                    "Added trigger %s to existing job %s for %s",
+                    entry_point, existing_job_id[:8], instance_id
+                )
+                return existing_job_id
+
+        # Create new job
+        job_id = self._make_job_id(now)
         data = {
             "instance_id": instance_id,
-            "entry_point": entry_point,
-            "payload": final_payload,
-            "created_at": time.time(),
+            "triggers": [{
+                "timestamp": trigger.timestamp,
+                "cause": trigger.cause,
+                "payload": trigger.payload
+            }],
+            "created_at": now,
         }
         self._jobs.put(job_id, data)
-        # Register the guard (unclaimed = pending)
         self._guards.put(instance_id, job_id)
+        logger.debug(
+            "Created new job %s for %s (trigger: %s)",
+            job_id[:8], instance_id, entry_point
+        )
         return job_id
 
     def merge_into_pending(
@@ -80,6 +167,7 @@ class JobQueue:
         payload_updates: dict | None = None,
     ) -> bool:
         """
+        Legacy method - now just calls enqueue() which handles both cases.
         Merge work into an existing pending (unclaimed) job for instance_id.
 
         Adds entry_point to the job's entry_points list (if not already present)
@@ -89,6 +177,7 @@ class JobQueue:
         Returns True if merge succeeded, False if no pending job exists
         (e.g. the job is already running or there is no job at all).
         """
+        # Check if job exists and is pending
         guard_items = self._guards.scan_items()
         guard = None
         for inst, jid, owner in guard_items:
@@ -97,36 +186,14 @@ class JobQueue:
                 break
 
         if guard is None:
-            return False
+            return False  # no job exists
 
-        job_id, owner = guard
+        _, owner = guard
         if owner is not None:
             return False  # job is running, can't merge
 
-        # Load the job data
-        data = self._jobs.get(job_id)
-        if data is None:
-            return False
-
-        # Merge entry_points
-        existing_eps = data["payload"].get("entry_points", [data.get("entry_point", "on_message")])
-        if entry_point not in existing_eps:
-            existing_eps.append(entry_point)
-        data["payload"]["entry_points"] = existing_eps
-
-        # Merge payload updates
-        if payload_updates:
-            for key, value in payload_updates.items():
-                if key == "entry_points":
-                    continue  # handled above
-                if key == "events" and isinstance(value, list):
-                    existing_events = data["payload"].get("events", [])
-                    existing_events.extend(value)
-                    data["payload"]["events"] = existing_events
-                else:
-                    data["payload"][key] = value
-
-        self._jobs.put(job_id, data)
+        # Job exists and is pending, enqueue will add the trigger
+        self.enqueue(instance_id, entry_point, payload_updates or {})
         return True
 
     def has_active(self, instance_id: str) -> bool:
@@ -158,28 +225,37 @@ class JobQueue:
         guards_items = self._guards.scan_items()  # [(instance_id, job_id, owner), ...]
         guard_map = {inst: (jid, owner) for inst, jid, owner in guards_items}
 
-        for job_id, data in all_jobs:
+        logger.debug("claim_next scanning %d jobs in queue", len(all_jobs))
+        for idx, (job_id, data) in enumerate(all_jobs):
             instance_id = data["instance_id"]
             guard = guard_map.get(instance_id)
             if guard is None:
+                logger.debug("  [%d] %s (job %s...) SKIP: no guard (stale)", idx, instance_id, job_id[:8])
                 continue  # no guard — stale job, skip
             _, owner = guard
             if owner is not None:
+                logger.debug("  [%d] %s (job %s...) SKIP: already running by %s", idx, instance_id, job_id[:8], owner)
                 continue  # already running
 
             if can_run and not can_run(instance_id):
+                logger.debug("  [%d] %s (job %s...) SKIP: can_run=False (provider slots full)", idx, instance_id, job_id[:8])
                 continue  # provider slots full
 
             # Try to atomically claim the guard
             if self._guards.claim(instance_id, worker_id):
+                logger.debug("  [%d] %s (job %s...) CLAIMED by %s", idx, instance_id, job_id[:8], worker_id)
+                # Migrate old job data if needed
+                triggers = self._migrate_job_data(data)
                 return Job(
                     job_id=job_id,
                     instance_id=instance_id,
-                    entry_point=data["entry_point"],
-                    payload=data.get("payload", {}),
-                    created_at=data["created_at"],
+                    triggers=triggers,
+                    created_at=data.get("created_at", time.time()),
                 )
+            else:
+                logger.debug("  [%d] %s (job %s...) SKIP: atomic claim failed (race)", idx, instance_id, job_id[:8])
 
+        logger.debug("claim_next found no claimable jobs")
         return None
 
     def complete(self, job: Job, worker_id: str) -> None:
@@ -208,12 +284,13 @@ class JobQueue:
         jobs = []
         for job_id, data in all_jobs:
             if data["instance_id"] in pending_instances:
+                # Migrate old job data if needed
+                triggers = self._migrate_job_data(data)
                 jobs.append(Job(
                     job_id=job_id,
                     instance_id=data["instance_id"],
-                    entry_point=data["entry_point"],
-                    payload=data.get("payload", {}),
-                    created_at=data["created_at"],
+                    triggers=triggers,
+                    created_at=data.get("created_at", time.time()),
                 ))
         return jobs
 
@@ -222,8 +299,15 @@ class JobQueue:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _make_job_id() -> str:
-        ts = int(time.time() * 1_000_000)
+    def _make_job_id(now: float | None = None) -> str:
+        """Generate a sortable job ID from timestamp and UUID.
+        
+        Args:
+            now: Optional timestamp (seconds since epoch). If None, uses current time.
+        """
+        if now is None:
+            now = time.time()
+        ts = int(now * 1_000_000)
         return f"{ts:020d}:{uuid.uuid4().hex}"
 
     def cleanup_stale_guards(self, max_age_seconds: float = 3600) -> int:

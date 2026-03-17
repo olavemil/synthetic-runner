@@ -140,7 +140,21 @@ class Checker:
                     )
                     for evt in events
                 ]
-                self._store.put(token_key, next_token)
+                
+                # Don't commit sync token yet if there's an active job
+                # (token will be committed after successful message consumption)
+                has_active_job = self._queue.has_active(instance_id)
+                if has_active_job:
+                    # Save as pending token to be committed after job completion
+                    pending_token_key = f"pending_token:{instance_id}:{space_name}"
+                    self._store.put(pending_token_key, next_token)
+                    logger.debug(
+                        "Saved pending sync token for %s/%s (will commit after message consumption)",
+                        instance_id, space_name,
+                    )
+                else:
+                    # No active job - safe to commit immediately
+                    self._store.put(token_key, next_token)
 
                 if normalized_events and token is None:
                     logger.info(
@@ -263,15 +277,20 @@ class Checker:
             logger.info("Resolved entity_id for %s via adapter lookup: %s", instance_id, resolved)
             return resolved
 
-        self._resolved_entity_ids[instance_id] = None
+        # Fallback: use instance_id to allow reactive events to proceed
+        # even when adapter lookup fails (e.g., Matrix 503 errors)
+        fallback = instance_id
+        self._resolved_entity_ids[instance_id] = fallback
         if instance_id not in self._warned_missing_entity_id:
             logger.warning(
                 "No entity_id configured for %s and adapter lookup failed; "
-                "reactive events will be skipped to avoid self-trigger loops",
+                "using instance_id '%s' as fallback to allow reactive events "
+                "(self-trigger filtering may be imprecise)",
                 instance_id,
+                fallback,
             )
             self._warned_missing_entity_id.add(instance_id)
-        return ""
+        return fallback
 
     # ------------------------------------------------------------------
     # Persistent event inbox
@@ -305,6 +324,32 @@ class Checker:
             return []
         store.delete(key)
         return raw
+
+    @staticmethod
+    def commit_pending_sync_tokens(store: NamespacedStore, instance_id: str) -> int:
+        """Commit all pending sync tokens for an instance after successful message consumption.
+
+        Called by the worker after successfully completing on_message phase.
+        Returns the number of tokens committed.
+        """
+        # Scan for all pending_token:{instance_id}:* keys
+        all_items = store.scan_items()  # [(key, value, owner), ...]
+        committed = 0
+        
+        prefix = f"pending_token:{instance_id}:"
+        for key, value, _ in all_items:
+            if key.startswith(prefix):
+                # Extract space name from key
+                space_name = key[len(prefix):]
+                # Commit to actual sync token
+                sync_token_key = f"{instance_id}:{space_name}"
+                store.put(sync_token_key, value)
+                # Delete pending token
+                store.delete(key)
+                committed += 1
+                logger.debug("Committed sync token for %s/%s", instance_id, space_name)
+        
+        return committed
 
     # ------------------------------------------------------------------
     # Schedule checking

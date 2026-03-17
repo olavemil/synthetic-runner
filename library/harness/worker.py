@@ -75,6 +75,11 @@ class Worker:
             ",".join(pending_instances) if pending_instances else "-",
         )
         logger.debug(
+            "Pending jobs FIFO order: %s",
+            " -> ".join(f"{j.instance_id}({j.job_id[:8]})" for j in pending_jobs[:10])
+            if pending_jobs else "-",
+        )
+        logger.debug(
             "Pending jobs breakdown: %s",
             {inst: len([j for j in pending_jobs if j.instance_id == inst]) for inst in pending_instances}
         )
@@ -90,8 +95,10 @@ class Worker:
                 logger.debug("No more jobs to claim (claimed_jobs=%d)", claimed_jobs)
                 break
             claimed_jobs += 1
-            logger.debug("Claimed job for %s (job_id=%s, entry_point=%s)", 
-                        job.instance_id, job.job_id, job.entry_point)
+            # Format triggers for logging
+            trigger_causes = ",".join(t.cause for t in job.triggers)
+            logger.debug("Claimed job for %s (job_id=%s, triggers=%s)", 
+                        job.instance_id, job.job_id, trigger_causes)
 
             provider_id = self._get_provider_id(job.instance_id)
             slot_key, slot_available = self._claim_provider_slot(provider_id)
@@ -111,7 +118,7 @@ class Worker:
                 target=self._run_job,
                 args=(job, slot_key),
                 daemon=True,
-                name=f"job-{job.instance_id}-{job.entry_point}",
+                name=f"job-{job.instance_id}-{trigger_causes[:30]}",
             )
             threads.append(t)
             t.start()
@@ -134,10 +141,8 @@ class Worker:
         try:
             config = self._registry.get_instance_config(job.instance_id)
             ctx = self._build_context(config, session_id=job.job_id)
-            payload = dict(job.payload or {})
-            entry_points = payload.pop("entry_points", [job.entry_point])
 
-            # Drain the persistent event inbox (written by checker)
+            # Process triggers to collect events and determine phases
             inbox_events_raw = Checker.drain_pending_events(
                 self._checker_store, job.instance_id
             )
@@ -145,26 +150,42 @@ class Worker:
                 Event(**evt) if isinstance(evt, dict) else evt
                 for evt in inbox_events_raw
             ]
-
-            has_heartbeat = bool(payload.pop("heartbeat", False)) or "heartbeat" in entry_points
+            
+            # Collect events from on_message triggers and check for heartbeat
+            has_on_message = False
+            has_heartbeat = False
+            for trigger in job.triggers:
+                if trigger.cause == "on_message":
+                    has_on_message = True
+                    trigger_events = trigger.payload.get("events", [])
+                    for evt in trigger_events:
+                        inbox_events.append(Event(**evt) if isinstance(evt, dict) else evt)
+                elif trigger.cause == "heartbeat":
+                    has_heartbeat = True
 
             # Build ordered phases: messages first, then heartbeat
             phases: list[tuple[str, dict]] = []
-            if inbox_events or "on_message" in entry_points:
+            if inbox_events or has_on_message:
                 phases.append(("on_message", {"events": inbox_events}))
             if has_heartbeat:
                 phases.append(("heartbeat", {}))
 
             if not phases:
-                # Fallback: run the primary entry point as before
-                phases.append((job.entry_point, payload))
+                # Fallback: use first trigger as entry point
+                if job.triggers:
+                    first = job.triggers[0]
+                    phases.append((first.cause, first.payload))
+                else:
+                    logger.warning("Job %s has no triggers and no inbox events", job.job_id)
+                    return
 
             logger.info(
-                "Running %s (job %s, phases=%s, events=%d)",
+                "Running %s (job %s, phases=%s, events=%d, triggers=%d)",
                 job.instance_id,
                 job.job_id,
                 "+".join(ep for ep, _ in phases),
                 len(inbox_events),
+                len(job.triggers),
             )
 
             for ep_name, ep_payload in phases:
@@ -189,6 +210,17 @@ class Worker:
                 phase_success = True
                 try:
                     handler(ctx, **ep_payload)
+                    
+                    # Commit pending sync tokens after successful on_message completion
+                    if ep_name == "on_message":
+                        committed = Checker.commit_pending_sync_tokens(
+                            self._checker_store, job.instance_id
+                        )
+                        if committed > 0:
+                            logger.info(
+                                "Committed %d pending sync token(s) for %s after successful on_message",
+                                committed, job.instance_id,
+                            )
                 except Exception:
                     phase_success = False
                     raise
