@@ -595,11 +595,21 @@ def thinking_session(
             if tc.name == "append_thinking":
                 existing = ctx.read("thinking.md") or ""
                 new_content = (existing + "\n\n" + tc.arguments.get("content", "")).strip()
-                ctx.write("thinking.md", new_content)
-                word_count = len(new_content.split())
-                result = f"Thoughts appended. thinking.md is now {word_count} words."
-                if word_count > 800:
-                    result += " Consider using replace_thinking to compact before it gets too long."
+                compacted = ctx.compact_file(new_content, path="thinking.md")
+                if compacted is not None:
+                    ctx.write("thinking.md", compacted)
+                    word_count = len(compacted.split())
+                    result = (
+                        f"Thoughts appended and auto-compacted "
+                        f"({len(new_content.split())} → {word_count} words). "
+                        f"thinking.md is now {word_count} words."
+                    )
+                else:
+                    ctx.write("thinking.md", new_content)
+                    word_count = len(new_content.split())
+                    result = f"Thoughts appended. thinking.md is now {word_count} words."
+                    if word_count > 800:
+                        result += " Consider using replace_thinking to compact before it gets too long."
             elif tc.name == "replace_thinking":
                 content = tc.arguments.get("content", "")
                 ctx.write("thinking.md", content)

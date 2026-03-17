@@ -21,6 +21,7 @@ def make_mock_ctx(files=None):
 
     ctx.read = MagicMock(side_effect=lambda p: _files.get(p, ""))
     ctx.write = MagicMock(side_effect=lambda p, c: _files.update({p: c}))
+    ctx.compact_file = MagicMock(return_value=None)
     ctx.list_spaces = MagicMock(return_value=["main"])
     ctx.send = MagicMock(return_value="$event1")
     return ctx

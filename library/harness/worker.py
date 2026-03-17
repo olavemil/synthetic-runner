@@ -434,6 +434,18 @@ class Worker:
                 api_key=self._config.analytics.api_key,
             )
 
+        compactor = None
+        if self._config.compact is not None:
+            from library.harness.compactor import Compactor
+            compact_provider = self._providers.get(self._config.compact.provider)
+            if compact_provider is not None:
+                compactor = Compactor(compact_provider, self._config.compact)
+            else:
+                logger.warning(
+                    "Compact provider '%s' not found — compaction disabled",
+                    self._config.compact.provider,
+                )
+
         ctx = InstanceContext(
             instance_id=instance_config.instance_id,
             species_id=instance_config.species,
@@ -446,6 +458,7 @@ class Worker:
             mailbox=mailbox,
             instance_config=instance_config,
             analytics=analytics,
+            compactor=compactor,
         )
         ctx._sync_config = self._config.sync
         return ctx

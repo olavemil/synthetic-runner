@@ -4,12 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Symbiosis toolkit** — a framework for building multi-layered LLM agent systems. The implementation is complete and tested.
-
-Key documents:
-- `docs/architecture.md` — Three-layer architecture specification
-- `docs/implementation.md` — Technical implementation roadmap
-- `proposals/neural_nets/` — Hybrid NN/LLM extension proposals (architecture + memory tools)
+**Symbiosis toolkit** — a framework for building multi-layered LLM agent systems with 6 species, all fully implemented and tested (~800 tests).
 
 ## Commands
 
@@ -23,116 +18,129 @@ uv run symbiosis tick          # check + work (one cycle, for testing)
 uv run symbiosis sync          # sync instance memory to data repo
 uv run symbiosis schedule      # print OS scheduler config files
 uv run symbiosis setup         # interactive setup wizard
-uv run symbiosis run           # legacy continuous loop
 ```
 
 ## Architecture
 
 Three layers with strict separation:
 
-- **Harness** (`library/harness/`) — Infrastructure: config, storage, SQLite store, LLM providers, messaging adapters, job queue, checker, worker, scheduler.
+- **Harness** (`library/harness/`) — Infrastructure: config, storage, SQLite store, LLM providers, adapters, job queue, checker, worker.
 - **Species** (`library/species/`) — Stateless behavior. Exports a `SpeciesManifest` with `entry_points`, `tools`, `default_files`, `spawn`. Handlers take `(ctx: InstanceContext, ...)`.
 - **Instance** — Pure data: a YAML config + namespaced file storage. No code.
 
-**InstanceContext** is the only interface between Species and Harness:
-- `ctx.read/write/list/exists` — namespaced file storage
-- `ctx.read_binary/write_binary` — binary file storage (PyTorch checkpoints, etc.)
-- `ctx.llm(messages, ...)` → `LLMResponse`
-- `ctx.send/poll(space, ...)` — messaging via logical space names
-- `ctx.send_to/read_inbox` — inter-instance mailboxes
-- `ctx.store/shared_store(namespace)` → `NamespacedStore` (SQLite)
-- `ctx.get_space_context(space)` — room metadata
-- `ctx.list_spaces()` — available logical space names
-
 **Species never** import vendor SDKs, construct absolute paths, or call HTTP directly.
 
-## Scheduling Architecture
+## InstanceContext API (ctx)
 
-The preferred deployment model uses OS scheduling (`launchd`/`systemd`/`cron`) to run two short-lived commands:
+The only interface between Species and Harness:
 
-- **`check`** (every ~5 min): polls messaging adapters + checks cron schedules → enqueues jobs into SQLite queue. No LLM calls.
-- **`work`** (every ~1 min): drains job queue run-to-empty using threads. Respects provider concurrency limits.
-
-State is persisted in SQLite (`harness.db`):
-- Sync tokens per instance/space
-- Schedule next-fire times
-- Idle heartbeat counts (`max_idle_heartbeats` in instance YAML throttles heartbeats when no messages)
-- Job queue with instance guards (prevents duplicate concurrent jobs per instance)
-- Provider slots for concurrency control (`max_concurrency` in harness.yaml)
-
-Generate OS schedule files with `symbiosis schedule` (reads `scheduler.check_interval` / `scheduler.work_interval` from `harness.yaml`).
+| Method | Description |
+|--------|-------------|
+| `ctx.read(path)` / `ctx.write(path, content)` | Namespaced text file storage |
+| `ctx.list(prefix)` / `ctx.exists(path)` | File listing / existence check |
+| `ctx.read_binary(path)` / `ctx.write_binary(path, data)` | Binary storage (PyTorch checkpoints) |
+| `ctx.compact_file(content, path=None)` | Compact via devstral if over threshold; returns compacted str or None |
+| `ctx.llm(messages, *, model, system, tools, max_tokens, caller)` | LLM call → `LLMResponse` |
+| `ctx.send(space, message, reply_to)` / `ctx.poll(space)` | Messaging via logical space names |
+| `ctx.send_to(target_id, msg)` / `ctx.read_inbox()` | Inter-instance mailboxes |
+| `ctx.store(ns)` / `ctx.shared_store(ns)` | `NamespacedStore` (SQLite, per-instance / per-species) |
+| `ctx.get_space_context(space)` / `ctx.list_spaces()` | Room metadata / available space names |
+| `ctx.config(key)` | Read instance config values |
+| `ctx.configure_send_policy(allow_send, max_sends, reason)` | Messaging throttle (set by Worker) |
 
 ## Config Structure
 
 ```
 config/
-  harness.yaml          # providers (with max_concurrency), adapters, scheduler, sync settings
+  harness.yaml          # providers (+ max_concurrency), adapters, scheduler, sync, compact
   instances/
-    <id>.yaml           # species, provider, model, messaging (with access_token), schedule
+    <id>.yaml           # species, provider, model, messaging, schedule, species-specific keys
 .env                    # secrets: API keys, Matrix tokens
 ```
 
-- `config/instances/example.yaml` is committed; real instance configs are gitignored.
-- Per-instance Matrix `access_token` lives in instance YAML (not shared adapter config).
-- `schedule.max_idle_heartbeats: N` limits heartbeat runs when no messages received.
+Key harness.yaml sections: `providers`, `adapters`, `scheduler`, `sync`, `analytics`, `compact`.
 
-## Data Sync & Publish
-
-Instance memory files (`.md`) can be automatically synced to a separate data repository for external visibility (e.g. GitHub Pages).
-
-Configure in `harness.yaml`:
-
+`compact` config (auto-compacts large files via devstral):
 ```yaml
-sync:
-  repo: ../synthetic-space    # path to data repo (can be relative)
-  prefix: symbiosis           # subdirectory within the data repo
-  branch: main
+compact:
+  provider: lmstudio
+  model: mistralai/devstral-small-2-2512
+  threshold_chars: 2048
 ```
 
-- **Sync** (`library/sync.py`): Copies `.md` files from `instances/*/memory/` to `<repo>/<prefix>/<instance_id>/`. Commits and pushes automatically. Triggered by `symbiosis sync` or `symbiosis work --sync`.
-- **Publish** (`library/publish.py`): Agents can publish rendered artefacts (reports, graphs, maps) to `_published/` within their data repo space, separate from memory files. Enabled via `make_tools(ctx, {"publish": True})`.
-- **Post-heartbeat rendering**: Neural Dreamer automatically renders `graph.html`, `map.png`, and `map_session.gif` after heartbeat and publishes them to the data repo.
-- Generated OS schedule files (`symbiosis schedule`) include `--sync` when sync is configured.
+## Scheduling
+
+- **`check`** (~5 min): polls adapters + cron schedules → enqueues jobs. No LLM calls.
+- **`work`** (~1 min): drains queue run-to-empty with threads. Respects `max_concurrency`.
+- State in SQLite (`harness.db`): sync tokens, schedule next-fire, idle counts, job queue, provider slots.
+
+## Species (6 total)
+
+| Species | Entry Points | Notable tools |
+|---------|-------------|---------------|
+| `draum` | on_message, heartbeat | base only |
+| `subconscious_dreamer` | on_message, heartbeat | base only, YAML pipelines |
+| `neural_dreamer` | on_message, heartbeat | graph, activation_map, neural, organize, creative |
+| `hecate` | on_message, heartbeat | graph, activation_map, multi-voice deliberation |
+| `thrivemind` | on_message, heartbeat | graph, activation_map, colony deliberation |
+| `consilium` | on_message, heartbeat | graph, activation_map, 5-persona pipeline |
+
+Full per-species config reference: `/invoke species-ref`
+
+## Finding Things Quickly
+
+**To find species behavior:** `library/species/<species_id>/__init__.py` + `about.md`
+
+**To find tool definitions:** `library/tools/tools.py` (schemas + dispatch), then module in `library/tools/`
+
+**To find harness flow:** `checker.py` → `jobqueue.py` → `worker.py` → `context.py`
+
+**To find prompt patterns:** `library/tools/patterns.py`, `library/tools/prompts.py`
+
+**To find test mocks:** any `tests/test_<species>.py` — all have `make_mock_ctx()` with `compact_file = MagicMock(return_value=None)`
+
+**Config loading:** `library/harness/config.py` — `load_harness_config()` / `load_instance_config()`
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `library/harness/config.py` | YAML loading with `${VAR}` env resolution |
-| `library/harness/context.py` | `InstanceContext` — main Species interface |
-| `library/harness/store.py` | `StoreDB` / `NamespacedStore` (SQLite, `claim`/`release` for atomic ops) |
+| `library/harness/config.py` | YAML loading with `${VAR}` env resolution; `HarnessConfig`, `InstanceConfig`, `CompactConfig` |
+| `library/harness/context.py` | `InstanceContext` — full species interface |
+| `library/harness/compactor.py` | `Compactor` — devstral-based file compaction |
+| `library/harness/store.py` | `StoreDB` / `NamespacedStore` (SQLite) |
 | `library/harness/jobqueue.py` | `JobQueue` — enqueue/claim/complete with instance guards |
-| `library/harness/checker.py` | `Checker` — poll + schedule check → enqueue |
-| `library/harness/worker.py` | `Worker` — run-to-empty with provider slot management |
-| `library/harness/scheduler.py` | Legacy continuous loop (kept for `symbiosis run`) |
-| `library/scheduling.py` | OS schedule file generation (launchd/systemd/crontab) |
-| `library/tools/patterns.py` | `gut_response`, `plan_response`, `compose_response`, etc. |
-| `library/tools/tools.py` | `make_tools()` / `handle_tool()` |
-| `library/tools/pipeline.py` | YAML pipeline runner |
-| `library/tools/segments.py` | Prompt segment registry, selection vectors, variable injection |
-| `library/tools/graph.py` | Semantic graph tools (persistent directed weighted graph) |
-| `library/tools/activation_map.py` | 2D activation map tools (attention/affect heatmap) |
-| `library/tools/neural.py` | Fast/slow neural net management, checkpoints, signal encoding |
-| `library/tools/rendering.py` | Graph→HTML, Map→PNG/GIF visualization |
-| `library/sync.py` | Instance memory sync to data repo |
-| `library/publish.py` | Publish artefacts to data repo `_published/` + post-heartbeat rendering |
-| `library/species/draum/` | Draum species: reactive + heartbeat |
-| `library/species/subconscious_dreamer/` | Subconscious Dreamer: three-phase thinking + response pipelines |
-| `library/species/neural_dreamer/` | Neural Dreamer: NN-driven prompt configuration + memory tools |
+| `library/harness/checker.py` | `Checker` — poll + cron → enqueue |
+| `library/harness/worker.py` | `Worker` — run-to-empty, builds `InstanceContext`, provider slots |
+| `library/harness/providers/` | `AnthropicProvider`, `OpenAICompatProvider` |
+| `library/harness/adapters/` | `MatrixAdapter`, `LocalFileAdapter` |
+| `library/tools/tools.py` | `make_tools()` schemas + `handle_tool()` dispatch |
+| `library/tools/patterns.py` | High-level patterns: `gut_response`, `run_session`, `thinking_session`, `run_organize_phase`, etc. |
+| `library/tools/phases.py` | Phase-scoped tool filtering: `get_tools_for_phase(phase)` |
+| `library/tools/prompts.py` | Prompt assembly: `read_memory()`, `format_events()`, `format_memory_context()`, etc. |
+| `library/tools/pipeline.py` | YAML pipeline runner (`run_pipeline`) |
+| `library/tools/organize.py` | Knowledge org tools (archive, topic CRUD) |
+| `library/tools/graph.py` | `SemanticGraph` — persistent directed weighted graph |
+| `library/tools/activation_map.py` | `ActivationMap` — 2D attention/affect heatmap |
+| `library/tools/neural.py` | `FastNet` / `SlowNet`, checkpoint management |
+| `library/tools/rendering.py` | Graph→HTML, Map→PNG/GIF |
+| `library/tools/segments.py` | Segment registry, selection vectors, variable injection |
+| `library/tools/deliberate.py` | `generate_with_identity()`, `deliberate()`, `recompose()` |
+| `library/tools/identity.py` | `Identity` dataclass, `format_persona()` |
+| `library/tools/hecate.py` | Hecate voice management toolkit |
+| `library/tools/thrivemind.py` | Colony management, spawn, voting |
+| `library/tools/consilium.py` | Five-persona pipeline stages |
+| `library/tools/voting.py` | `borda_tally()`, `approval_tally()` |
+| `library/sync.py` | Memory sync to data repo |
+| `library/publish.py` | Artifact publish to `_published/` |
+| `library/scheduling.py` | OS schedule file generation |
 | `library/__main__.py` | CLI entry point |
-| `library/setup_wizard.py` | Interactive setup wizard |
 
-## Neural Net Extension
+## Available Skills
 
-Spec: `proposals/neural_nets/architecture-technical.md` + `proposals/neural_nets/tools-memory-representations.md`
-
-Adds a dual neural network layer and non-textual memory tools on top of the existing pipeline architecture. All new code is **tools modules** (opt-in by species), with one small harness addition (`read_binary`/`write_binary`).
-
-### Key design decisions
-
-- **Tools not harness:** NN, graph, map, segments are behavioral capabilities, not infrastructure
-- **Binary storage:** Small nets (<64 hidden units) stored as binary files via `ctx.read_binary`/`write_binary`
-- **Two nets:** Fast net (shallow, updates per message review) encodes session affect; slow net (deeper, updates at sleep) encodes accumulated disposition
-- **Segment selection:** NN outputs control which pre-written prompt segments are active and in what order — fast net controls state/relational/meta segments, slow net controls identity/temporal/task segments
-- **Variable injection:** Named floats (`tone_warmth`, `verbosity`, `confidence`, etc.) injected into active segments for continuous modulation
-- **Graph + map tools:** Available to any species via `make_tools(ctx, {"graph": True, "activation_map": True})`; graph feeds slow net, map feeds fast net
+| Skill | Invoke | Contents |
+|-------|--------|---------|
+| agent-setup | `/agent-setup` | Creating instances + new species, harness wiring |
+| ctx-api | `/ctx-api` | Full InstanceContext API + config format reference |
+| species-ref | `/species-ref` | All 6 species: entry points, default files, config keys |
+| tools-patterns | `/tools-patterns` | make_tools options, phase scopes, patterns.py, prompts.py |

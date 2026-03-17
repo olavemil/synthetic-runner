@@ -11,6 +11,7 @@ from library.harness.mailbox import Mailbox
 
 if TYPE_CHECKING:
     from library.harness.analytics import AnalyticsClient
+    from library.harness.compactor import Compactor
     from library.harness.providers import LLMProvider, LLMResponse
     from library.harness.adapters import Event, MessagingAdapter
     from library.harness.config import InstanceConfig
@@ -32,6 +33,7 @@ class InstanceContext:
         mailbox: Mailbox,
         instance_config: InstanceConfig,
         analytics: AnalyticsClient | None = None,
+        compactor: Compactor | None = None,
     ):
         self._instance_id = instance_id
         self._species_id = species_id
@@ -44,6 +46,7 @@ class InstanceContext:
         self._mailbox = mailbox
         self._instance_config = instance_config
         self._analytics = analytics
+        self._compactor = compactor
         self._send_allowed = True
         self._send_max: int | None = None
         self._send_reason = ""
@@ -86,6 +89,16 @@ class InstanceContext:
         self._storage.write_binary(path, data)
         if self._analytics is not None:
             self._analytics.track("file_written", {"path": path, "size": len(data), "binary": True})
+
+    def compact_file(self, content: str, path: str | None = None) -> str | None:
+        """Compact content if it exceeds the configured threshold.
+
+        Returns compacted string if threshold exceeded and compaction succeeded,
+        otherwise None (caller should use original content).
+        """
+        if self._compactor is None:
+            return None
+        return self._compactor.maybe_compact(content, path=path)
 
     # --- Config (read-only) ---
 
