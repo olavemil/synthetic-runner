@@ -86,6 +86,13 @@ class AnalyticsConfig:
 
 
 @dataclass
+class CompactConfig:
+    provider: str
+    model: str
+    threshold_chars: int = 6000
+
+
+@dataclass
 class HarnessConfig:
     providers: list[ProviderConfig] = field(default_factory=list)
     adapters: list[AdapterConfig] = field(default_factory=list)
@@ -95,6 +102,7 @@ class HarnessConfig:
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     sync: SyncConfig = field(default_factory=SyncConfig)
     analytics: AnalyticsConfig | None = None
+    compact: CompactConfig | None = None
 
     def get_provider(self, provider_id: str) -> ProviderConfig:
         for p in self.providers:
@@ -177,6 +185,15 @@ def load_harness_config(
             api_key=analytics_raw.get("api_key"),
         )
 
+    compact = None
+    if "compact" in resolved:
+        compact_raw = resolved["compact"]
+        compact = CompactConfig(
+            provider=compact_raw["provider"],
+            model=compact_raw["model"],
+            threshold_chars=int(compact_raw.get("threshold_chars", 6000)),
+        )
+
     return HarnessConfig(
         providers=providers,
         adapters=adapters,
@@ -186,6 +203,7 @@ def load_harness_config(
         scheduler=scheduler,
         sync=sync,
         analytics=analytics,
+        compact=compact,
     )
 
 

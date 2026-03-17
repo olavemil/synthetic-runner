@@ -203,7 +203,16 @@ def handle_tool(ctx: InstanceContext, name: str, arguments: dict) -> tuple[str, 
         return content or "(empty file)", False
 
     if name == "write_file":
-        ctx.write(arguments["path"], arguments["content"])
+        path = arguments["path"]
+        content = arguments["content"]
+        compacted = ctx.compact_file(content, path=path)
+        if compacted is not None:
+            ctx.write(path, compacted)
+            return (
+                f"File written and auto-compacted "
+                f"({len(content)} → {len(compacted)} chars)."
+            ), False
+        ctx.write(path, content)
         return "File written.", False
 
     if name == "list_files":

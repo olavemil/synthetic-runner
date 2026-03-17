@@ -1,117 +1,49 @@
 ---
 name: agent-setup
-description: Guide for creating and configuring Symbiosis agents (instances, species, harness wiring).
+description: Guide for creating and configuring Symbiosis agents (instances, species, harness wiring). Use when creating new instances, designing new species, or debugging how harness components connect.
 user_invocable: true
 ---
 
 # Agent Setup Guide
 
-## Three-Layer Architecture
-
-Symbiosis uses three layers with strict separation:
-
-1. **Harness** (`library/harness/`) — Infrastructure: config, storage, SQLite store, LLM providers, messaging adapters, job queue, checker, worker, scheduler. Knows nothing about agent behavior.
-
-2. **Species** (`library/species/`) — Stateless behavior code. Defines what an agent type *does*. Exports a `SpeciesManifest` with entry points, tools, default files, and a spawn function. Handlers receive `(ctx: InstanceContext, ...)`.
-
-3. **Instance** — Pure data: a YAML config file + namespaced file storage. No code. Each instance declares which species it uses and how it connects to infrastructure.
-
 ## Creating a New Instance
 
-Create a YAML file in `config/instances/<id>.yaml`:
+Create `config/instances/<id>.yaml`. The filename stem becomes the `instance_id`.
 
 ```yaml
-species: draum              # Which species to use
-provider: anthropic         # LLM provider key from harness.yaml
-model: claude-opus-4-6      # Model ID
+species: draum              # species_id (must match a registered species)
+provider: anthropic         # provider key from harness.yaml providers list
+model: claude-opus-4-6
 
 messaging:
-  adapter: matrix-main      # Adapter key from harness.yaml
+  adapter: matrix-main      # adapter key from harness.yaml adapters list
   entity_id: "@bot:matrix.org"
-  access_token: ${BOT_MATRIX_TOKEN}  # Env var reference
+  access_token: ${BOT_MATRIX_TOKEN}  # resolved from .env
   spaces:
-    - name: main             # Logical space name (used in ctx.send("main", ...))
-      handle: "!room:matrix.org"  # Platform-specific handle
+    - name: main            # logical name (used in ctx.send("main", ...))
+      handle: "!room:matrix.org"
 
 schedule:
-  heartbeat: "0 * * * *"    # Cron expression for heartbeat entry point
-  max_idle_heartbeats: 3    # Skip heartbeat after N idle cycles
+  heartbeat: "0 * * * *"   # cron expression
+  max_idle_heartbeats: 3    # skip heartbeat after N idle cycles (no messages)
+  min_thinks_per_reply: 2   # minimum heartbeats between replies (throttle)
 ```
 
-Species-specific config goes as top-level keys (e.g., `thrivemind:`, `hecate:`).
+Species-specific config goes as top-level keys (see species-ref skill for details).
 
-## Data Sync & Publish
+Instance configs are **gitignored** except `example.yaml`. Real tokens live in `.env`.
 
-Instance memory can be synced to a separate data repository. Configure in `harness.yaml`:
+## Creating a New Species
 
-```yaml
-sync:
-  repo: ../synthetic-space    # path to data repo
-  prefix: symbiosis           # subdirectory within the repo
-  branch: main
+### 1. Create the package
+
+```
+library/species/<species_id>/
+  __init__.py    # Species class + handlers
+  about.md       # Description (loaded by introspect tool)
 ```
 
-- **Sync**: `symbiosis work --sync` or `symbiosis sync` copies `.md` files to `<repo>/<prefix>/<instance_id>/`, commits, and pushes.
-- **Publish tool**: Agents can publish files to `_published/` in their data repo space. Enable with `make_tools(ctx, {"publish": True})`.
-- **Post-heartbeat rendering**: Neural Dreamer auto-renders graph HTML and map PNG/GIF after heartbeat.
-- OS schedule files auto-include `--sync` when sync is configured.
-
-## Available Species
-
-### Draum (`species: draum`)
-Persistent memory agent with gut-plan-compose response pipeline.
-
-**Entry points:** `on_message` (reactive), `heartbeat` (scheduled)
-**Default files:** `thinking.md`, `project.md`, `sessions.md`, `scratchpad.md`, `sensitivity.md`, `intentions.md`, `subconscious.md`
-**Config keys:** None beyond standard
-
-### Thrivemind (`species: thrivemind`)
-Colony-based deliberation. A colony of individuals with personality dimensions proposes, votes, and converges on responses. Individuals have evocative adjective-adjective-noun names, track age (sessions since spawn), and receive relative age context during reflection.
-
-**Entry points:** `on_message` (reactive), `heartbeat` (scheduled, constitution updates + spawn cycle)
-**Default files:** `constitution.md`, `sessions.md`
-**Config keys:**
-```yaml
-thrivemind:
-  min_colony_size: 8         # colony grows from this size
-  max_colony_size: 16        # colony is trimmed to this size
-  suggestion_fraction: 0.5
-  approval_threshold: 3
-  consensus_threshold: 0.6
-  suggestion_model: ""       # provider/model for suggestions
-  writer_model: ""           # provider/model for final composition
-  voice_space: main
-```
-
-**Voting:** Each voter ranks candidates; voters who placed the winner in their **top 2** picks give +1 approval to the winner. Voters whose top pick was not the winner lose -1. This dual-pick system makes positive approval more achievable.
-
-**Spawn cycle:** When colony is below max, eligible parents survive and offspring are added. At max, eligible parents are replaced by offspring. Colony is always kept within min/max bounds.
-
-### Hecate (`species: hecate`)
-Multi-voice deliberation with named identity voices that think, vote, and compose responses.
-
-**Entry points:** `on_message` (reactive), `heartbeat` (scheduled)
-**Config keys:** `hecate.voices` (list of voice definitions with name, model, personality)
-
-### Subconscious Dreamer (`species: subconscious_dreamer`)
-Three-phase thinking (active thinking → subconscious → dreaming) and three-phase response (intuition → worry → action). Uses declarative YAML pipelines.
-
-**Entry points:** `on_message` (reactive), `heartbeat` (scheduled)
-**Default files:** `thinking.md`, `dreams.md`, `concerns_and_ideas.md`
-**Config keys:** None beyond standard
-
-### Neural Dreamer (`species: neural_dreamer`) — In Progress
-Extends Subconscious Dreamer with dual neural networks (fast + slow) that control prompt segment selection and variable injection. Adds semantic graph and activation map memory tools.
-
-**Entry points:** `on_message` (fast cycle: gut → suggest → reply → review), `heartbeat` (slow cycle: think + sleep)
-**Default files:** `thinking.md`, `dreams.md`, `concerns_and_ideas.md`, net checkpoints (binary)
-**Config keys:** `neural_dreamer.fast_net`, `neural_dreamer.slow_net`, `neural_dreamer.graph`, `neural_dreamer.activation_map`
-
-See `neural-dreamer.md` in this skill directory for full architecture details.
-
-## How Species Define Behavior
-
-A species is a class extending `Species` that returns a `SpeciesManifest`:
+### 2. Define the manifest
 
 ```python
 from library.species import Species, SpeciesManifest, EntryPoint
@@ -122,36 +54,101 @@ class MySpecies(Species):
             species_id="my-species",
             entry_points=[
                 EntryPoint(name="on_message", handler=on_message, trigger="message"),
-                EntryPoint(name="heartbeat", handler=heartbeat, schedule="*/15 * * * *"),
+                EntryPoint(name="heartbeat", handler=heartbeat, schedule="0 * * * *"),
             ],
-            tools=[],
-            default_files={"memory.md": "# Memory\n"},
-            spawn=self._spawn,
+            tools=[],               # extra tool schemas (usually empty — tools built in handlers)
+            default_files={         # written on first spawn
+                "memory.md": "# Memory\n",
+            },
+            spawn=None,             # optional setup callback(ctx)
         )
 ```
 
-**Key rules:**
-- Species never import vendor SDKs, construct absolute paths, or call HTTP directly
-- All infrastructure access goes through `InstanceContext` (the `ctx` parameter)
-- Species are stateless — all state lives in instance storage or SQLite store
+### 3. Write handlers
 
-## How Harness Wires Them
+```python
+def on_message(ctx: InstanceContext, events: list[Event]) -> None:
+    # events = list of Event(event_id, sender, body, timestamp)
+    # All infrastructure via ctx only — no direct imports
+    response = ctx.llm(messages=[...], system="...", caller="on_message")
+    ctx.send("main", response.message)
 
-1. **Config loading** (`harness/config.py`): Reads `harness.yaml` for providers/adapters, scans `config/instances/` for instance YAML files
-2. **Checker** (`harness/checker.py`): Polls messaging adapters + checks cron schedules, enqueues jobs into SQLite queue
-3. **Worker** (`harness/worker.py`): Drains job queue, constructs `InstanceContext` for each job, calls species handler
-4. **InstanceContext** (`harness/context.py`): The only interface between species and harness — provides `ctx.read/write/list/exists`, `ctx.llm()`, `ctx.send/poll()`, `ctx.store()`, `ctx.get_space_context()`, `ctx.get_all_space_contexts()`
+def heartbeat(ctx: InstanceContext) -> None:
+    # Scheduled work — no messaging unless send policy allows it
+    pass
+```
 
-## InstanceContext API Summary
+### 4. Register the species
 
-| Method | Description |
-|--------|-------------|
-| `ctx.read(path)` / `ctx.write(path, content)` | Namespaced file storage |
-| `ctx.list(prefix)` / `ctx.exists(path)` | File listing and existence |
-| `ctx.llm(messages, ...)` | LLM call (returns `LLMResponse`) |
-| `ctx.send(space, message)` / `ctx.poll(space)` | Messaging via logical space names |
-| `ctx.send_to(target_id, message)` / `ctx.read_inbox()` | Inter-instance mailboxes |
-| `ctx.store(namespace)` / `ctx.shared_store(namespace)` | SQLite key-value store |
-| `ctx.get_space_context(space)` | Room metadata (name, topic, members) |
-| `ctx.get_all_space_contexts()` | All rooms' metadata |
-| `ctx.config(key)` | Read instance config values |
+In `library/__main__.py`, species are auto-discovered from `library.species.*` subpackages. No manual registration needed — just make the class extend `Species`.
+
+### Key rules for species code
+
+- Never import `anthropic`, `openai`, or any vendor SDK
+- Never construct absolute file paths — use `ctx.read/write` only
+- Never call HTTP directly — use `ctx.llm()` and `ctx.send/poll()`
+- Keep handlers stateless — all state in `ctx.write()` or `ctx.store()`
+
+## How Harness Wires Things
+
+```
+symbiosis check:
+  Checker.run()
+    → polls messaging adapter for each instance
+    → checks cron schedules
+    → enqueues jobs into SQLite JobQueue
+
+symbiosis work:
+  Worker.run()
+    → claims jobs from queue (respects provider concurrency slots)
+    → for each job in a thread:
+        config = registry.get_instance_config(instance_id)
+        ctx = _build_context(config)   # constructs InstanceContext
+        handler(ctx, **payload)        # calls on_message or heartbeat
+        queue.complete(job)
+```
+
+`_build_context()` in `worker.py` wires:
+- `NamespacedStorage` (files in `instances/<id>/memory/`)
+- `LLMProvider` (looked up from harness config by provider id)
+- `MessagingAdapter` (per-instance Matrix credentials)
+- `Mailbox` (inter-instance messages)
+- `Compactor` (if `compact:` section in harness.yaml)
+- `AnalyticsClient` (if `analytics:` section)
+
+## Adding a Provider
+
+In `harness.yaml`:
+```yaml
+providers:
+  - id: lmstudio
+    type: openai_compat
+    base_url: ${LMSTUDIO_BASE_URL}
+    api_key: lm-studio
+    max_concurrency: 1          # optional slot limit
+  - id: anthropic
+    type: anthropic
+    api_key: ${ANTHROPIC_API_KEY}
+```
+
+Supported types: `openai_compat` (any OpenAI-compatible endpoint), `anthropic`.
+
+## Data Sync & Publish
+
+```yaml
+# harness.yaml
+sync:
+  repo: ../synthetic-space    # relative path to data repo
+  prefix: symbiosis
+  branch: main
+```
+
+- `symbiosis work --sync` or `symbiosis sync` — copies `instances/*/memory/*.md` to data repo, commits + pushes.
+- **Publish tool**: enable with `make_tools(ctx, {"publish": True})` — agent can call `publish(path, content)` to write to `_published/` in data repo.
+
+## Related Skills
+
+- `/ctx-api` — Full InstanceContext API reference + config format
+- `/species-ref` — All 6 species with config keys and tool options
+- `/tools-patterns` — make_tools options, patterns.py, phase scopes
+- `neural-dreamer.md` (this directory) — Neural Dreamer architecture detail

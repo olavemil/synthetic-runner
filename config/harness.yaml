@@ -29,3 +29,8 @@ sync:
 analytics:
   base_url: http://localhost:8000
   api_key: ${ANALYTICS_API_KEY}
+
+compact:
+  provider: lmstudio
+  model: mistralai/devstral-small-2-2512
+  threshold_chars: 2048

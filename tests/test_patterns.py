@@ -25,6 +25,7 @@ def make_mock_ctx(memory_files=None):
 
     ctx.read = MagicMock(side_effect=mock_read)
     ctx.write = MagicMock(side_effect=mock_write)
+    ctx.compact_file = MagicMock(return_value=None)
     ctx.list = MagicMock(return_value=list(files.keys()))
     ctx.exists = MagicMock(side_effect=lambda p: p in files)
 
