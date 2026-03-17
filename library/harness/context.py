@@ -131,7 +131,7 @@ class InstanceContext:
         max_tokens: int = 4096,
         caller: str = "?",
     ) -> LLMResponse:
-        from library.harness.response_validator import is_response_pathological
+        from library.harness.response_validator import is_response_pathological, normalize_pathological_response
 
         # Compatibility: toolkit helpers may pass a provider hint.
         # InstanceContext currently routes to the instance's configured provider.
@@ -178,10 +178,13 @@ class InstanceContext:
                         )
                         continue
                     else:
+                        # Strip offending paragraphs
+                        messages = normalize_pathological_response(messages)
                         logger.warning(
-                            "[%s] Response rejected after 3 attempts: %s — returning last attempt",
+                            "[%s] Response rejected after 3 attempts: %s — returning last attempt with duplicated paragraphs removed",
                             caller, reason,
                         )
+                        break  # Return last response even if still somewhat pathological after normalization
 
             # Response is good or we're out of retries
             if self._analytics is not None:

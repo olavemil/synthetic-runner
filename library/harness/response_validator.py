@@ -56,9 +56,9 @@ def _check_repeating_sentences(text: str) -> tuple[bool, str]:
     for s in normalized:
         counts[s] = counts.get(s, 0) + 1
 
-    # If any sentence appears more than once, it's suspicious (in typical varied text)
+    # If any sentence appears more than twice, it's suspicious (in typical varied text), unless it's a header of some kind
     for s, count in counts.items():
-        if count >= 2:
+        if count > 2 and len(s) > 20:  # Ignore very short sentences which might be common phrases
             return True, f"sentence appears {count} times: '{s[:50]}...'"
 
     return False, ""
@@ -110,3 +110,21 @@ def is_response_pathological(text: str) -> tuple[bool, str]:
         return True, reason
 
     return False, ""
+
+def normalize_pathological_response(text: str) -> str:
+    """Attempt to salvage a pathological response by normalizing it (e.g. removing repeated paragraphs).
+
+    This is a best-effort attempt and may not always produce a good result, but can be useful in cases where the LLM output is mostly fine except for some repetition.
+
+    Returns:
+        Normalized text with obvious pathologies removed.
+    """
+    paragraphs = _get_paragraphs(text)
+    seen = set()
+    unique_paragraphs = []
+    for p in paragraphs:
+        norm = _normalize_for_comparison(p)
+        if norm not in seen:
+            seen.add(norm)
+            unique_paragraphs.append(p)
+    return "\n\n".join(unique_paragraphs)

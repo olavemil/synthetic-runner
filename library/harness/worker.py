@@ -224,6 +224,22 @@ class Worker:
                     heartbeat_external_count,
                 )
             self._queue.complete(job, self._worker_id)
+            
+            # Check if events arrived during this job and enqueue on_message if needed
+            if success:
+                pending = self._checker_store.get(f"pending_events:{job.instance_id}")
+                if isinstance(pending, list) and pending:
+                    logger.info(
+                        "Job completion found pending messages for %s (count=%d), enqueueing on_message",
+                        job.instance_id, len(pending),
+                    )
+                    enqueued_job_id = self._queue.enqueue(job.instance_id, "on_message", {})
+                    if enqueued_job_id:
+                        logger.info(
+                            "Enqueued on_message for %s (job %s)",
+                            job.instance_id, enqueued_job_id,
+                        )
+            
             if slot_key:
                 self._release_provider_slot(slot_key)
             if not success:

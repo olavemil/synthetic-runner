@@ -33,7 +33,7 @@ class AnalyticsClient:
         api_key: str | None = None,
         timeout: float = 2.0,
     ):
-        self._endpoint = base_url.rstrip("/") + "/api/analytics/events"
+        self._endpoint = base_url.rstrip("/") + "/events"
         self._analytics_user_id = _pseudonymize(instance_id)
         self._analytics_session_id = _pseudonymize(session_id)
         self._api_key = api_key
@@ -43,10 +43,10 @@ class AnalyticsClient:
         """Fire-and-forget: send an event in a background daemon thread."""
         event = {
             "event_name": event_name,
-            "analytics_user_id": self._analytics_user_id,
-            "analytics_session_id": self._analytics_session_id,
+            "user_id": self._analytics_user_id,
+            "session_id": self._analytics_session_id,
             "properties": properties or {},
-            "client_timestamp": datetime.now(timezone.utc).isoformat(),
+            "event_time": datetime.now(timezone.utc).isoformat(),
         }
         threading.Thread(target=self._send, args=(event,), daemon=True).start()
 
@@ -55,7 +55,7 @@ class AnalyticsClient:
             data = json.dumps(event).encode()
             headers = {"Content-Type": "application/json"}
             if self._api_key:
-                headers["X-Api-Key"] = self._api_key
+                headers["X-API-Key"] = self._api_key
             req = urllib.request.Request(
                 self._endpoint,
                 data=data,

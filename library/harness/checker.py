@@ -402,6 +402,16 @@ class Checker:
                     # Reset window budgets on guaranteed thinking (heartbeat)
                     self.reset_window_budgets(self._store, instance_id, now)
 
+                    # Check for pending messages that accumulated since last heartbeat
+                    pending_key = f"pending_events:{instance_id}"
+                    pending = self._store.get(pending_key)
+                    if isinstance(pending, list) and pending:
+                        logger.info(
+                            "%s heartbeat found pending messages (count=%d), enqueueing on_message",
+                            instance_id, len(pending),
+                        )
+                        self._ensure_job(instance_id, "on_message")
+
                 ensured = self._ensure_job(instance_id, ep_name)
                 logger.debug("%s.%s ensure_job returned: %s", instance_id, ep_name, ensured)
                 if ensured:
