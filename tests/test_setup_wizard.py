@@ -26,7 +26,7 @@ class TestSetupWizard:
                     "1",            # Matrix adapter in harness: no
                     "1",            # Instance setup: create
                     "alpha",        # Instance name
-                    "1",            # Species: draum
+                    "2",            # Species: draum (alphabetically after consilium)
                     "1",            # Intelligence type: persistent
                     "2",            # Operating mode: hybrid
                     "2",            # Instance provider: anthropic

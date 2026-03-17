@@ -22,7 +22,7 @@ from library.tools.hecate import (
     _build_memory_context,
 )
 from library.tools.deliberate import generate_with_identity, think_with_context
-from library.tools.prompts import format_events, get_entity_id
+from library.tools.prompts import format_events, get_entity_id, select_target_room
 
 if TYPE_CHECKING:
     from library.harness.adapters import Event
@@ -81,22 +81,7 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
     context = _build_memory_context(shared_memory)
     entity_id = get_entity_id(ctx)
     full_prompt = format_events(events, self_entity_id=entity_id)
-    events_with_room = [evt for evt in events if evt.room]
-    if events_with_room:
-        target_event = max(events_with_room, key=lambda evt: evt.timestamp)
-        target_room = target_event.room
-        room_events = [evt for evt in events_with_room if evt.room == target_room]
-        if len({evt.room for evt in events_with_room}) > 1:
-            logger.info(
-                "Hecate on_message received events from multiple rooms; selecting latest room=%s (room_events=%d total_events=%d)",
-                target_room,
-                len(room_events),
-                len(events),
-            )
-    else:
-        target_room = cfg.voice_space
-        room_events = events
-
+    target_room, room_events = select_target_room(events, cfg.voice_space)
     room_prompt = format_events(room_events, self_entity_id=entity_id) if room_events else full_prompt
     suggestions: list[tuple[str, str]] = []
     for voice in cfg.voices:

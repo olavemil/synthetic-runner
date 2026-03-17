@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from library.harness.adapters import Event
     from library.harness.context import InstanceContext
+
+logger = logging.getLogger(__name__)
 
 
 STANDARD_MEMORY_FILES = [
@@ -137,3 +140,29 @@ def format_memory_context(memory: dict[str, str], exclude: list[str] | None = No
             continue
         parts.append(f"## {fname}\n{content}")
     return "\n\n".join(parts)
+
+
+def select_target_room(
+    events: list[Event], default_space: str
+) -> tuple[str, list[Event]]:
+    """Select target room from events, preferring the latest room with events.
+
+    Returns (target_room, scoped_events) where scoped_events are filtered to
+    the target room when multiple rooms are present, or all events if none
+    have a room set.
+    """
+    events_with_room = [evt for evt in events if evt.room]
+    if events_with_room:
+        target_event = max(events_with_room, key=lambda evt: evt.timestamp)
+        target_room = target_event.room
+        room_events = [evt for evt in events_with_room if evt.room == target_room]
+        if len({evt.room for evt in events_with_room}) > 1:
+            logger.info(
+                "select_target_room: multiple rooms; selecting latest room=%s "
+                "(room_events=%d total_events=%d)",
+                target_room,
+                len(room_events),
+                len(events),
+            )
+        return target_room, room_events
+    return default_space, events

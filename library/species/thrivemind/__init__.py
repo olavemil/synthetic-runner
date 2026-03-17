@@ -57,7 +57,7 @@ from library.tools.thrivemind import (
 )
 from library.tools.identity import Identity, parse_model
 from library.tools.deliberate import deliberate, recompose
-from library.tools.prompts import format_events, get_entity_id
+from library.tools.prompts import format_events, get_entity_id, select_target_room
 
 if TYPE_CHECKING:
     from library.harness.adapters import Event
@@ -128,22 +128,7 @@ def on_message(ctx: InstanceContext, events: list[Event]) -> None:
     cfg = load_config(ctx)
 
     # Select target room from events
-    events_with_room = [evt for evt in events if evt.room]
-    if events_with_room:
-        target_event = max(events_with_room, key=lambda evt: evt.timestamp)
-        target_room = target_event.room
-        room_events = [evt for evt in events_with_room if evt.room == target_room]
-        if len({evt.room for evt in events_with_room}) > 1:
-            logger.info(
-                "Thrivemind on_message received events from multiple rooms; "
-                "selecting latest room=%s (room_events=%d total_events=%d)",
-                target_room, len(room_events), len(events),
-            )
-    else:
-        target_room = cfg.voice_space
-        room_events = events
-
-    scoped_events = room_events if room_events else events
+    target_room, scoped_events = select_target_room(events, cfg.voice_space)
 
     # Load or initialize colony
     colony = load_colony(ctx)
