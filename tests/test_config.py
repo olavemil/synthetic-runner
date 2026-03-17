@@ -225,3 +225,94 @@ class TestProviderMaxConcurrency:
         result = load_harness_config(config_path)
         assert result.providers[0].max_concurrency == 2
         assert result.providers[1].max_concurrency is None
+
+
+class TestSchedulingConstraints:
+    """Tests for SchedulingConstraints parsing in instance config."""
+
+    def test_scheduling_constraints_defaults(self):
+        from library.harness.config import SchedulingConstraints
+        sc = SchedulingConstraints()
+        assert sc.guaranteed_thinking_interval == 14400
+        assert sc.max_replies_per_window == 3
+        assert sc.reactive_thinking_max_sessions == 2
+        assert sc.reactive_thinking_cooldown == 900
+        assert sc.on_message_thinking_phases is None
+
+    def test_scheduling_constraints_custom(self):
+        from library.harness.config import SchedulingConstraints
+        sc = SchedulingConstraints(
+            guaranteed_thinking_interval=7200,
+            max_replies_per_window=5,
+            reactive_thinking_max_sessions=3,
+            reactive_thinking_cooldown=600,
+            on_message_thinking_phases={"THINKING", "COMPOSING"},
+        )
+        assert sc.guaranteed_thinking_interval == 7200
+        assert sc.max_replies_per_window == 5
+        assert sc.reactive_thinking_max_sessions == 3
+        assert sc.reactive_thinking_cooldown == 600
+        assert sc.on_message_thinking_phases == {"THINKING", "COMPOSING"}
+
+    def test_scheduling_constraints_parsed_from_yaml(self, tmp_path):
+        config = {
+            "species": "draum",
+            "provider": "anthropic",
+            "model": "claude-opus-4-6",
+            "scheduling_constraints": {
+                "guaranteed_thinking_interval": 7200,
+                "max_replies_per_window": 5,
+                "reactive_thinking_max_sessions": 3,
+                "reactive_thinking_cooldown": 600,
+                "on_message_thinking_phases": ["THINKING"],
+            },
+        }
+        config_dir = tmp_path / "config" / "instances"
+        config_dir.mkdir(parents=True)
+        config_path = config_dir / "test.yaml"
+        config_path.write_text(yaml.dump(config))
+
+        result = load_instance_config(config_path)
+        assert result.scheduling_constraints is not None
+        sc = result.scheduling_constraints
+        assert sc.guaranteed_thinking_interval == 7200
+        assert sc.max_replies_per_window == 5
+        assert sc.reactive_thinking_max_sessions == 3
+        assert sc.reactive_thinking_cooldown == 600
+        assert sc.on_message_thinking_phases == {"THINKING"}
+
+    def test_scheduling_constraints_not_in_extra(self, tmp_path):
+        """Ensure scheduling_constraints is parsed and not left in extra dict."""
+        config = {
+            "species": "draum",
+            "provider": "anthropic",
+            "model": "claude",
+            "scheduling_constraints": {
+                "max_replies_per_window": 2,
+            },
+            "custom_key": "should be in extra",
+        }
+        config_dir = tmp_path / "config" / "instances"
+        config_dir.mkdir(parents=True)
+        config_path = config_dir / "test.yaml"
+        config_path.write_text(yaml.dump(config))
+
+        result = load_instance_config(config_path)
+        assert result.scheduling_constraints is not None
+        assert "scheduling_constraints" not in result.extra
+        assert result.extra.get("custom_key") == "should be in extra"
+
+    def test_no_scheduling_constraints(self, tmp_path):
+        """Instance without scheduling_constraints has None."""
+        config = {
+            "species": "draum",
+            "provider": "anthropic",
+            "model": "claude",
+        }
+        config_dir = tmp_path / "config" / "instances"
+        config_dir.mkdir(parents=True)
+        config_path = config_dir / "test.yaml"
+        config_path.write_text(yaml.dump(config))
+
+        result = load_instance_config(config_path)
+        assert result.scheduling_constraints is None

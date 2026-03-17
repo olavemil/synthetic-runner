@@ -951,8 +951,19 @@ def _on_message_rate_limited(
     logger.info("on_message rate-limited complete (gut + review only)")
 
 
-def on_message(ctx: InstanceContext, events: list[Event]) -> None:
-    """Fast cycle: gut → suggest → reply → review → send."""
+def on_message(
+    ctx: InstanceContext,
+    events: list[Event],
+    *,
+    on_message_phase: str | None = None,
+) -> None:
+    """Fast cycle: gut → suggest → reply → review → send.
+
+    Args:
+        ctx: Instance context.
+        events: Incoming message events.
+        on_message_phase: Optional phase restriction from scheduling constraints.
+    """
     if not events:
         return
 

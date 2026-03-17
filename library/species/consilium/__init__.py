@@ -84,8 +84,19 @@ def _run_create_phase(ctx: InstanceContext, cfg: ConsiliumConfig) -> None:
     run_create_phase(ctx, _PROMPT_CREATE, create_context, label="Consilium heartbeat")
 
 
-def on_message(ctx: InstanceContext, events: list[Event]) -> None:
-    """Run the 8->4->1 deliberation pipeline on incoming events."""
+def on_message(
+    ctx: InstanceContext,
+    events: list[Event],
+    *,
+    on_message_phase: str | None = None,
+) -> None:
+    """Run the 8->4->1 deliberation pipeline on incoming events.
+
+    Args:
+        ctx: Instance context.
+        events: Incoming message events.
+        on_message_phase: Optional phase restriction from scheduling constraints.
+    """
     if not events:
         logger.info("Consilium on_message skipped (events=0)")
         return

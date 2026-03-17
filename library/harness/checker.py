@@ -399,6 +399,9 @@ class Checker:
                     self._store.put(thinks_key, thinks_count + 1)
                     logger.debug("%s heartbeat thinks_since_reply: %d -> %d", instance_id, thinks_count, thinks_count + 1)
 
+                    # Reset window budgets on guaranteed thinking (heartbeat)
+                    self.reset_window_budgets(self._store, instance_id, now)
+
                 ensured = self._ensure_job(instance_id, ep_name)
                 logger.debug("%s.%s ensure_job returned: %s", instance_id, ep_name, ensured)
                 if ensured:
@@ -493,6 +496,108 @@ class Checker:
 
         store.put(f"reply_hour_start:{instance_id}", hour_start)
         store.put(f"reply_count_hour:{instance_id}", hour_count + 1)
+
+    # ------------------------------------------------------------------
+    # Scheduling constraints (per-window budgets)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def check_reply_budget(
+        store: NamespacedStore,
+        instance_id: str,
+        constraints,  # SchedulingConstraints or None
+    ) -> bool:
+        """Check if the instance can send another reply in the current window.
+
+        Returns True if allowed, False if budget exhausted.
+        """
+        if constraints is None:
+            return True  # No constraints configured
+        replies = store.get(f"replies_this_window:{instance_id}") or 0
+        try:
+            replies = int(replies)
+        except (TypeError, ValueError):
+            replies = 0
+        return replies < constraints.max_replies_per_window
+
+    @staticmethod
+    def increment_reply_count(store: NamespacedStore, instance_id: str) -> None:
+        """Increment the reply counter for the current window."""
+        key = f"replies_this_window:{instance_id}"
+        current = store.get(key) or 0
+        try:
+            current = int(current)
+        except (TypeError, ValueError):
+            current = 0
+        store.put(key, current + 1)
+
+    @staticmethod
+    def check_reactive_thinking_budget(
+        store: NamespacedStore,
+        instance_id: str,
+        constraints,  # SchedulingConstraints or None
+        now: float,
+    ) -> bool:
+        """Check if the instance can run a reactive thinking session.
+
+        Returns True if allowed, False if budget exhausted or in cooldown.
+        """
+        if constraints is None:
+            return True  # No constraints configured
+
+        sessions = store.get(f"reactive_sessions:{instance_id}") or 0
+        last_session_time = store.get(f"last_reactive_session:{instance_id}") or 0
+        try:
+            sessions = int(sessions)
+            last_session_time = float(last_session_time)
+        except (TypeError, ValueError):
+            sessions = 0
+            last_session_time = 0
+
+        if sessions >= constraints.reactive_thinking_max_sessions:
+            return False
+        if (now - last_session_time) < constraints.reactive_thinking_cooldown:
+            return False
+        return True
+
+    @staticmethod
+    def record_reactive_session(store: NamespacedStore, instance_id: str, now: float) -> None:
+        """Record that a reactive thinking session was triggered."""
+        sessions_key = f"reactive_sessions:{instance_id}"
+        sessions = store.get(sessions_key) or 0
+        try:
+            sessions = int(sessions)
+        except (TypeError, ValueError):
+            sessions = 0
+        store.put(sessions_key, sessions + 1)
+        store.put(f"last_reactive_session:{instance_id}", now)
+
+    @staticmethod
+    def reset_window_budgets(store: NamespacedStore, instance_id: str, now: float) -> None:
+        """Reset all budgets for a new guaranteed thinking window.
+
+        Called when heartbeat fires (guaranteed thinking).
+        """
+        store.put(f"replies_this_window:{instance_id}", 0)
+        store.put(f"reactive_sessions:{instance_id}", 0)
+        store.put(f"last_guaranteed_thinking:{instance_id}", now)
+        logger.debug("Reset window budgets for %s", instance_id)
+
+    @staticmethod
+    def get_on_message_phase(constraints) -> str | None:
+        """Get the restricted phase for on_message handlers.
+
+        Returns the phase name if constraints specify phase restrictions,
+        None otherwise.
+        """
+        if constraints is None:
+            return None
+        if constraints.on_message_thinking_phases:
+            # Return the first (and typically only) phase in the set
+            phases = constraints.on_message_thinking_phases
+            if phases:
+                return next(iter(phases))
+        return None
 
     # ------------------------------------------------------------------
     # Adapter management

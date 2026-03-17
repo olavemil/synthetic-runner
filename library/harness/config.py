@@ -124,6 +124,24 @@ class SpaceMapping:
 
 
 @dataclass
+class SchedulingConstraints:
+    """Per-instance scheduling budget constraints."""
+
+    # Guaranteed thinking windows
+    guaranteed_thinking_interval: int = 14400  # seconds (4 hours)
+
+    # Reply budget between guaranteed thinking windows
+    max_replies_per_window: int = 3
+
+    # Reactive thinking after messages
+    reactive_thinking_max_sessions: int = 2  # max thinking sessions per message event
+    reactive_thinking_cooldown: int = 900    # seconds (15 min) between reactive sessions
+
+    # Phase restrictions for on_message (e.g., {"THINKING"} to exclude COMPOSING/REVIEWING)
+    on_message_thinking_phases: set[str] | None = None
+
+
+@dataclass
 class MessagingConfig:
     adapter: str
     entity_id: str = ""
@@ -139,6 +157,7 @@ class InstanceConfig:
     model: str
     messaging: MessagingConfig | None = None
     schedule: dict[str, object] = field(default_factory=dict)
+    scheduling_constraints: SchedulingConstraints | None = None
     extra: dict = field(default_factory=dict)
 
 
@@ -233,6 +252,22 @@ def load_instance_config(
             spaces=spaces,
         )
 
+    scheduling_constraints = None
+    if "scheduling_constraints" in resolved:
+        sc = resolved["scheduling_constraints"]
+        phases = sc.get("on_message_thinking_phases")
+        scheduling_constraints = SchedulingConstraints(
+            guaranteed_thinking_interval=int(
+                sc.get("guaranteed_thinking_interval", 14400)
+            ),
+            max_replies_per_window=int(sc.get("max_replies_per_window", 3)),
+            reactive_thinking_max_sessions=int(
+                sc.get("reactive_thinking_max_sessions", 2)
+            ),
+            reactive_thinking_cooldown=int(sc.get("reactive_thinking_cooldown", 900)),
+            on_message_thinking_phases=set(phases) if phases else None,
+        )
+
     return InstanceConfig(
         instance_id=instance_id,
         species=resolved["species"],
@@ -240,9 +275,18 @@ def load_instance_config(
         model=resolved["model"],
         messaging=messaging,
         schedule=resolved.get("schedule", {}),
+        scheduling_constraints=scheduling_constraints,
         extra={
             k: v
             for k, v in resolved.items()
-            if k not in ("species", "provider", "model", "messaging", "schedule")
+            if k
+            not in (
+                "species",
+                "provider",
+                "model",
+                "messaging",
+                "schedule",
+                "scheduling_constraints",
+            )
         },
     )

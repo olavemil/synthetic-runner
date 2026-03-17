@@ -65,8 +65,19 @@ def _default_voice_files(voice_names: list[str]) -> dict[str, str]:
     return files
 
 
-def on_message(ctx: InstanceContext, events: list[Event]) -> None:
-    """Three voices draft, randomize, and one random voice composes the final reply."""
+def on_message(
+    ctx: InstanceContext,
+    events: list[Event],
+    *,
+    on_message_phase: str | None = None,
+) -> None:
+    """Three voices draft, randomize, and one random voice composes the final reply.
+
+    Args:
+        ctx: Instance context.
+        events: Incoming message events.
+        on_message_phase: Optional phase restriction from scheduling constraints.
+    """
     if not events:
         logger.info("Hecate on_message skipped (events=0)")
         return

@@ -83,8 +83,19 @@ def heartbeat(ctx: InstanceContext) -> None:
     run_pipeline(ctx, _HEARTBEAT_STEPS, initial_state=initial_state)
 
 
-def on_message(ctx: InstanceContext, events: list[Event]) -> None:
-    """Three-phase response: intuition → worry → action → send."""
+def on_message(
+    ctx: InstanceContext,
+    events: list[Event],
+    *,
+    on_message_phase: str | None = None,
+) -> None:
+    """Three-phase response: intuition → worry → action → send.
+
+    Args:
+        ctx: Instance context.
+        events: Incoming message events.
+        on_message_phase: Optional phase restriction from scheduling constraints.
+    """
     if not events:
         return
 

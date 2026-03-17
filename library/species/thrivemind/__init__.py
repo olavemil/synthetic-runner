@@ -118,8 +118,19 @@ def _run_creative_phase(ctx: InstanceContext, cfg: ThrivemindConfig) -> None:
     run_create_phase(ctx, _PROMPT_CREATE, create_context, label="Thrivemind heartbeat")
 
 
-def on_message(ctx: InstanceContext, events: list[Event]) -> None:
-    """Run colony deliberation round on incoming events."""
+def on_message(
+    ctx: InstanceContext,
+    events: list[Event],
+    *,
+    on_message_phase: str | None = None,
+) -> None:
+    """Run colony deliberation round on incoming events.
+
+    Args:
+        ctx: Instance context.
+        events: Incoming message events.
+        on_message_phase: Optional phase restriction from scheduling constraints.
+    """
     if not events:
         logger.info("Thrivemind on_message skipped (events=0)")
         return

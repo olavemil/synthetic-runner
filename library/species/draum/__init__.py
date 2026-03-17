@@ -37,8 +37,20 @@ DEFAULT_FILES = {
 }
 
 
-def on_message(ctx: InstanceContext, events: list[Event]) -> None:
-    """Reactive pipeline: gut → plan → compose → send, then post-session processes."""
+def on_message(
+    ctx: InstanceContext,
+    events: list[Event],
+    *,
+    on_message_phase: str | None = None,
+) -> None:
+    """Reactive pipeline: gut → plan → compose → send, then post-session processes.
+
+    Args:
+        ctx: Instance context.
+        events: Incoming message events.
+        on_message_phase: Optional phase restriction from scheduling constraints.
+            When set, restricts which phases/tools are available during processing.
+    """
     if not events:
         return
 

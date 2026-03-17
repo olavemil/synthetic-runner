@@ -212,6 +212,8 @@ class Worker:
             # Record reply for rate limiting
             if sent_count > 0:
                 Checker.record_reply_sent(self._checker_store, job.instance_id)
+                # Also increment per-window reply budget counter
+                Checker.increment_reply_count(self._checker_store, job.instance_id)
                 logger.info("Recorded reply sent for %s (rate limit tracking)", job.instance_id)
             if ctx is not None and heartbeat_gate_used and sent_count > 0:
                 seen_key = self._heartbeat_seen_key(job.instance_id)
@@ -251,6 +253,7 @@ class Worker:
 
             # Check reply rate limits
             rate_limited = False
+            budget_limited = False
             if allow:
                 config = self._registry.get_instance_config(job.instance_id)
                 schedule_config = config.schedule if isinstance(config.schedule, dict) else {}
@@ -263,22 +266,42 @@ class Worker:
                         job.instance_id,
                     )
 
+                # Check per-window reply budget from scheduling constraints
+                if allow and config.scheduling_constraints:
+                    if not Checker.check_reply_budget(
+                        self._checker_store,
+                        job.instance_id,
+                        config.scheduling_constraints,
+                    ):
+                        budget_limited = True
+                        allow = False
+                        logger.info(
+                            "Reply budget exhausted for %s (window budget reached)",
+                            job.instance_id,
+                        )
+
+            # Determine reason for policy
+            if rate_limited:
+                reason = "on_message reply rate-limited (cooldown or hourly cap)"
+            elif budget_limited:
+                reason = "on_message reply budget exhausted (window limit reached)"
+            else:
+                reason = "on_message sends require external events and are limited to one message"
+
             ctx.configure_send_policy(
                 allow_send=allow,
                 max_sends=1 if allow else 0,
-                reason=(
-                    "on_message reply rate-limited" if rate_limited
-                    else "on_message sends require external events and are limited to one message"
-                ),
+                reason=reason,
             )
             logger.info(
-                "Configured send policy for %s.%s (allow=%s max_sends=%d events=%d rate_limited=%s)",
+                "Configured send policy for %s.%s (allow=%s max_sends=%d events=%d rate_limited=%s budget_limited=%s)",
                 job.instance_id,
                 entry_point,
                 allow,
                 1 if allow else 0,
                 event_count,
                 rate_limited,
+                budget_limited,
             )
             return False, 0
 
