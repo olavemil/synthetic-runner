@@ -82,84 +82,86 @@ def on_message(
         logger.info("Hecate on_message skipped (events=0)")
         return
 
-    logger.info("Hecate on_message start (events=%d)", len(events))
-    cfg = load_config(ctx)
-    if len(cfg.voices) != 3:
-        logger.warning("Hecate requires exactly 3 voices; got %d", len(cfg.voices))
-        return
+    # Always run entity mapping after processing, regardless of outcome
+    from library.tools.patterns import run_entity_mapping_phase
+    try:
+        logger.info("Hecate on_message start (events=%d)", len(events))
+        cfg = load_config(ctx)
+        if len(cfg.voices) != 3:
+            logger.warning("Hecate requires exactly 3 voices; got %d", len(cfg.voices))
+            return
 
-    shared_memory = load_shared_memory(ctx)
-    context = _build_memory_context(shared_memory)
-    entity_id = get_entity_id(ctx)
-    full_prompt = format_events(events, self_entity_id=entity_id)
-    target_room, room_events = select_target_room(events, cfg.voice_space)
-    room_prompt = format_events(room_events, self_entity_id=entity_id) if room_events else full_prompt
-    suggestions: list[tuple[str, str]] = []
-    for voice in cfg.voices:
-        suggestion_prompt = (
-            _SUGGEST_PROMPT
+        shared_memory = load_shared_memory(ctx)
+        context = _build_memory_context(shared_memory)
+        entity_id = get_entity_id(ctx)
+        full_prompt = format_events(events, self_entity_id=entity_id)
+        target_room, room_events = select_target_room(events, cfg.voice_space)
+        room_prompt = format_events(room_events, self_entity_id=entity_id) if room_events else full_prompt
+        suggestions: list[tuple[str, str]] = []
+        for voice in cfg.voices:
+            suggestion_prompt = (
+                _SUGGEST_PROMPT
+                .replace("{target_room}", target_room)
+                .replace("{conversation}", room_prompt)
+                .replace("{voice_name}", voice.name)
+            )
+            raw = generate_with_identity(
+                ctx,
+                voice,
+                suggestion_prompt,
+                context=context,
+                max_tokens=2048,
+            )
+            suggestion = _to_one_sentence(raw, max_chars=220)
+            if suggestion:
+                suggestions.append((voice.name, suggestion))
+
+        if not suggestions:
+            logger.info("Hecate on_message no suggestions generated for room=%s; skipping", target_room)
+            return
+
+        random.shuffle(suggestions)
+        joined = "\n".join(f"- ({name}) {text}" for name, text in suggestions)
+        composing_voice = random.choice(cfg.voices)
+        compose_prompt = (
+            _COMPOSE_PROMPT
             .replace("{target_room}", target_room)
             .replace("{conversation}", room_prompt)
-            .replace("{voice_name}", voice.name)
+            .replace("{candidates}", joined)
+            .replace("{voice_name}", composing_voice.name)
+            .replace("{personality}", composing_voice.personality)
         )
-        raw = generate_with_identity(
+        final = generate_with_identity(
             ctx,
-            voice,
-            suggestion_prompt,
+            composing_voice,
+            compose_prompt,
             context=context,
-            max_tokens=2048,
-        )
-        suggestion = _to_one_sentence(raw, max_chars=220)
-        if suggestion:
-            suggestions.append((voice.name, suggestion))
+            max_tokens=4096,
+        ).strip()
+        if final:
+            logger.info(
+                "Hecate on_message sending composed reply via voice=%s (suggestions=%d) to %s",
+                composing_voice.name,
+                len(suggestions),
+                target_room,
+            )
+            ctx.send(target_room, final)
+        else:
+            logger.info("Hecate on_message final composition empty for room=%s; skipping send", target_room)
 
-    if not suggestions:
-        logger.info("Hecate on_message no suggestions generated for room=%s; skipping", target_room)
-        return
-
-    random.shuffle(suggestions)
-    joined = "\n".join(f"- ({name}) {text}" for name, text in suggestions)
-    composing_voice = random.choice(cfg.voices)
-    compose_prompt = (
-        _COMPOSE_PROMPT
-        .replace("{target_room}", target_room)
-        .replace("{conversation}", room_prompt)
-        .replace("{candidates}", joined)
-        .replace("{voice_name}", composing_voice.name)
-        .replace("{personality}", composing_voice.personality)
-    )
-    final = generate_with_identity(
-        ctx,
-        composing_voice,
-        compose_prompt,
-        context=context,
-        max_tokens=4096,
-    ).strip()
-    if final:
-        logger.info(
-            "Hecate on_message sending composed reply via voice=%s (suggestions=%d) to %s",
-            composing_voice.name,
-            len(suggestions),
-            target_room,
-        )
-        ctx.send(target_room, final)
-    else:
-        logger.info("Hecate on_message final composition empty for room=%s; skipping send", target_room)
-
-    # Update each voice's subconscious
-    for v in cfg.voices:
-        voice_memory = load_voice_memory(ctx, v)
-        subconscious_prompt = (
-            _SUBCONSCIOUS_PROMPT
-            .replace("{conversation}", full_prompt)
-        )
-        new_sub = update_voice_subconscious(ctx, v, full_prompt, shared_memory, voice_memory,
-                                            user_prompt=subconscious_prompt)
-        ctx.write(f"{v.name.lower()}_subconscious.md", new_sub)
-    logger.info("Hecate on_message completed subconscious updates (voices=%d)", len(cfg.voices))
-
-    from library.tools.patterns import run_entity_mapping_phase
-    run_entity_mapping_phase(ctx, events)
+        # Update each voice's subconscious
+        for v in cfg.voices:
+            voice_memory = load_voice_memory(ctx, v)
+            subconscious_prompt = (
+                _SUBCONSCIOUS_PROMPT
+                .replace("{conversation}", full_prompt)
+            )
+            new_sub = update_voice_subconscious(ctx, v, full_prompt, shared_memory, voice_memory,
+                                                user_prompt=subconscious_prompt)
+            ctx.write(f"{v.name.lower()}_subconscious.md", new_sub)
+        logger.info("Hecate on_message completed subconscious updates (voices=%d)", len(cfg.voices))
+    finally:
+        run_entity_mapping_phase(ctx, events)
 
 
 def _run_organize_phase(ctx: InstanceContext, cfg: "HecateConfig") -> None:

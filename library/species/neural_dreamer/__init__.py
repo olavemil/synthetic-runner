@@ -959,9 +959,12 @@ def on_message(
     if not events:
         return
 
-    senders = {e.sender for e in events}
-    logger.info("on_message starting (instance=%s, events=%d, senders=%s)",
-                ctx.instance_id, len(events), ", ".join(senders))
+    # Always run entity mapping after processing, regardless of outcome
+    from library.tools.patterns import run_entity_mapping_phase
+    try:
+        senders = {e.sender for e in events}
+        logger.info("on_message starting (instance=%s, events=%d, senders=%s)",
+                    ctx.instance_id, len(events), ", ".join(senders))
 
     events_text = format_events(events, self_entity_id=get_entity_id(ctx))
     thinking = ctx.read("thinking.md") or ""
@@ -1096,16 +1099,15 @@ def on_message(
     else:
         logger.info("on_message: no review output")
 
-    # --- Optional post-reply extra thinking (step 10) ---
-    nn_available = shared_params.get("_nn_available", False)
-    if nn_available:
-        processing_depth = shared_params.get("processing_depth", 0.5)
-        if probabilistic(processing_depth * 0.3, label="post_reply_think"):
-            logger.info("on_message: running post-reply extra thinking")
-            _run_think_phase(ctx, weights, variables)
-
-    from library.tools.patterns import run_entity_mapping_phase
-    run_entity_mapping_phase(ctx, events)
+        # --- Optional post-reply extra thinking (step 10) ---
+        nn_available = shared_params.get("_nn_available", False)
+        if nn_available:
+            processing_depth = shared_params.get("processing_depth", 0.5)
+            if probabilistic(processing_depth * 0.3, label="post_reply_think"):
+                logger.info("on_message: running post-reply extra thinking")
+                _run_think_phase(ctx, weights, variables)
+    finally:
+        run_entity_mapping_phase(ctx, events)
 
 
 class NeuralDreamer(Species):

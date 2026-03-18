@@ -152,9 +152,12 @@ def on_message(
         logger.info("Thrivemind on_message skipped (events=0)")
         return
 
-    logger.info("Thrivemind on_message start (events=%d)", len(events))
-    cfg = load_config(ctx)
-    policies = load_policies(ctx, cfg)
+    # Always run entity mapping after processing, regardless of outcome
+    from library.tools.patterns import run_entity_mapping_phase
+    try:
+        logger.info("Thrivemind on_message start (events=%d)", len(events))
+        cfg = load_config(ctx)
+        policies = load_policies(ctx, cfg)
 
     # Select target room from events
     target_room, scoped_events = select_target_room(events, cfg.voice_space)
@@ -327,15 +330,14 @@ def on_message(
 
     # Update cohesion based on message consensus alignment
     colony = update_cohesion(colony, result["votes"], winner_ids, cfg)
-    save_colony(ctx, colony)
-    approvals = [ind.approval for ind in colony]
-    logger.info(
-        "Thrivemind on_message updated approvals (min=%d max=%d size=%d)",
-        min(approvals) if approvals else 0, max(approvals) if approvals else 0, len(colony),
-    )
-
-    from library.tools.patterns import run_entity_mapping_phase
-    run_entity_mapping_phase(ctx, events)
+        save_colony(ctx, colony)
+        approvals = [ind.approval for ind in colony]
+        logger.info(
+            "Thrivemind on_message updated approvals (min=%d max=%d size=%d)",
+            min(approvals) if approvals else 0, max(approvals) if approvals else 0, len(colony),
+        )
+    finally:
+        run_entity_mapping_phase(ctx, events)
 
 
 def heartbeat(ctx: InstanceContext) -> None:

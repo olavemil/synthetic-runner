@@ -110,67 +110,69 @@ def on_message(
         logger.info("Consilium on_message skipped (events=0)")
         return
 
-    logger.info("Consilium on_message start (events=%d)", len(events))
-    cfg = load_config(ctx)
-    if len(cfg.personas) != 5:
-        logger.warning("Consilium requires exactly 5 personas; got %d", len(cfg.personas))
-        return
-
-    target_room, scoped_events = select_target_room(events, cfg.voice_space)
-    shared = load_shared_memory(ctx)
-    context = build_shared_context(shared)
-    conversation = format_events(scoped_events, self_entity_id=get_entity_id(ctx))
-
-    # Include messages received before this batch as additional context, then record current events
-    prior_msgs = load_received_messages(ctx)
-    if prior_msgs.strip():
-        context = context + f"\n\n## Prior Messages (since last heartbeat)\n{prior_msgs.strip()}" if context else f"## Prior Messages (since last heartbeat)\n{prior_msgs.strip()}"
-    append_received_events(ctx, events)
-
-    # Phase 1: Drafting — 5 persona drafts + 3 ghost one-liners
-    # Load ghost-generated ideas and recommendations for persona context (not ghost)
-    ghost_ctx = load_ghost_context(ctx, cfg)
-    candidates = run_drafting_phase(ctx, cfg, conversation, target_room, context, persona_extra_context=ghost_ctx)
-    if not candidates:
-        logger.info("Consilium on_message: no candidates; skipping")
-        return
-
-    # Phase 2: Reduction — 4 random personas reduce to bullet summaries
-    summaries, excluded = run_reduction_phase(
-        ctx, cfg, candidates, conversation, target_room, context,
-    )
-    if not summaries:
-        logger.info("Consilium on_message: no summaries; skipping")
-        return
-
-    # Phase 3: Merge — ghost merges summaries into structured spec
-    spec = run_merge_phase(ctx, cfg, summaries, conversation, target_room, context)
-    if not spec:
-        logger.info("Consilium on_message: empty spec; skipping")
-        return
-
-    # Phase 4: Transform — excluded persona transforms spec into final reply
-    final = run_transform_phase(
-        ctx, cfg, spec, excluded, conversation, target_room, context,
-    )
-    if not final:
-        logger.info("Consilium on_message: empty final reply; skipping")
-        return
-
-    ctx.send(target_room, final)
-    logger.info("Consilium on_message: sent reply to %s", target_room)
-
-    # Phase 5: Review — each persona appends one-line analysis
-    run_review_phase(ctx, cfg, final, conversation, context)
-
-    # Subconscious updates
-    for persona in cfg.personas:
-        update_persona_subconscious(ctx, persona, conversation, shared)
-
+    # Always run entity mapping after processing, regardless of outcome
     from library.tools.patterns import run_entity_mapping_phase
-    run_entity_mapping_phase(ctx, events)
+    try:
+        logger.info("Consilium on_message start (events=%d)", len(events))
+        cfg = load_config(ctx)
+        if len(cfg.personas) != 5:
+            logger.warning("Consilium requires exactly 5 personas; got %d", len(cfg.personas))
+            return
 
-    logger.info("Consilium on_message completed")
+        target_room, scoped_events = select_target_room(events, cfg.voice_space)
+        shared = load_shared_memory(ctx)
+        context = build_shared_context(shared)
+        conversation = format_events(scoped_events, self_entity_id=get_entity_id(ctx))
+
+        # Include messages received before this batch as additional context, then record current events
+        prior_msgs = load_received_messages(ctx)
+        if prior_msgs.strip():
+            context = context + f"\n\n## Prior Messages (since last heartbeat)\n{prior_msgs.strip()}" if context else f"## Prior Messages (since last heartbeat)\n{prior_msgs.strip()}"
+        append_received_events(ctx, events)
+
+        # Phase 1: Drafting — 5 persona drafts + 3 ghost one-liners
+        # Load ghost-generated ideas and recommendations for persona context (not ghost)
+        ghost_ctx = load_ghost_context(ctx, cfg)
+        candidates = run_drafting_phase(ctx, cfg, conversation, target_room, context, persona_extra_context=ghost_ctx)
+        if not candidates:
+            logger.info("Consilium on_message: no candidates; skipping")
+            return
+
+        # Phase 2: Reduction — 4 random personas reduce to bullet summaries
+        summaries, excluded = run_reduction_phase(
+            ctx, cfg, candidates, conversation, target_room, context,
+        )
+        if not summaries:
+            logger.info("Consilium on_message: no summaries; skipping")
+            return
+
+        # Phase 3: Merge — ghost merges summaries into structured spec
+        spec = run_merge_phase(ctx, cfg, summaries, conversation, target_room, context)
+        if not spec:
+            logger.info("Consilium on_message: empty spec; skipping")
+            return
+
+        # Phase 4: Transform — excluded persona transforms spec into final reply
+        final = run_transform_phase(
+            ctx, cfg, spec, excluded, conversation, target_room, context,
+        )
+        if not final:
+            logger.info("Consilium on_message: empty final reply; skipping")
+            return
+
+        ctx.send(target_room, final)
+        logger.info("Consilium on_message: sent reply to %s", target_room)
+
+        # Phase 5: Review — each persona appends one-line analysis
+        run_review_phase(ctx, cfg, final, conversation, context)
+
+        # Subconscious updates
+        for persona in cfg.personas:
+            update_persona_subconscious(ctx, persona, conversation, shared)
+
+        logger.info("Consilium on_message completed")
+    finally:
+        run_entity_mapping_phase(ctx, events)
 
 
 def _write_meta_thinking(

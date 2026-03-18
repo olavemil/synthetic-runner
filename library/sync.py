@@ -21,6 +21,7 @@ import logging
 import shutil
 import subprocess
 from pathlib import Path
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,24 @@ def _init_data_repo(repo_path: Path, branch: str) -> None:
 def _display_name(stem: str) -> str:
     """Convert a file stem to a human-readable display name."""
     return stem.replace("_", " ").replace("-", " ").title()
+
+
+def _encode_path(path: Path) -> Path:
+    """URL-encode file name components while preserving directory structure.
+    
+    This ensures files with special characters (like @user:matrix.org.md)
+    can be properly displayed in web browsers.
+    """
+    parts = list(path.parts)
+    encoded_parts = []
+    for part in parts:
+        # Encode the filename/directory name, preserving the extension for the last part
+        if part == parts[-1] and '.' in part:
+            stem, ext = part.rsplit('.', 1)
+            encoded_parts.append(f"{quote(stem, safe='-_')}.{ext}")
+        else:
+            encoded_parts.append(quote(part, safe='-_'))
+    return Path(*encoded_parts)
 
 
 def _write_index_files(out_dir: Path) -> int:
@@ -93,7 +112,8 @@ def _write_index_files(out_dir: Path) -> int:
         # Root-level files
         for md_file in root_files:
             display = _display_name(md_file.stem)
-            link = str(md_file.relative_to(instance_dir).with_suffix(""))
+            rel = md_file.relative_to(instance_dir)
+            link = str(_encode_path(rel).with_suffix(""))
             lines.append(f"- [{display}]({link})")
 
         # Subdirectories as sections
@@ -116,13 +136,15 @@ def _write_index_files(out_dir: Path) -> int:
                     for md_file in sorted(categories[cat_name]):
                         rel = md_file.relative_to(instance_dir)
                         display = _display_name(md_file.stem)
-                        lines.append(f"- [{display}]({rel.with_suffix('')})")
+                        encoded_link = str(_encode_path(rel).with_suffix(""))
+                        lines.append(f"- [{display}]({encoded_link})")
                     lines.append("")
             else:
                 for md_file in files:
                     rel = md_file.relative_to(instance_dir)
                     display = _display_name(md_file.stem)
-                    lines.append(f"- [{display}]({rel.with_suffix('')})")
+                    encoded_link = str(_encode_path(rel).with_suffix(""))
+                    lines.append(f"- [{display}]({encoded_link})")
 
         # Published HTML visualizations
         published_dir = instance_dir / "_published"
@@ -235,7 +257,9 @@ def sync_instances(
 
         for source_file in sorted(files_to_copy):
             rel = source_file.relative_to(memory_dir)
-            dest = dest_instance_dir / rel
+            # URL-encode the destination path for proper web display
+            encoded_rel = _encode_path(rel)
+            dest = dest_instance_dir / encoded_rel
 
             raw_content = source_file.read_text(errors="replace")
             # Skip empty files — cleared originals (e.g. removed individual slots)
@@ -243,7 +267,7 @@ def sync_instances(
             if not raw_content.strip():
                 continue
 
-            live_rel_paths.add(rel)
+            live_rel_paths.add(encoded_rel)
             dest.parent.mkdir(parents=True, exist_ok=True)
 
             # Only add frontmatter for markdown files
@@ -266,14 +290,15 @@ def sync_instances(
                     continue
                 if dest_file.suffix not in _SYNCED_EXTS:
                     continue
-                rel = dest_file.relative_to(dest_instance_dir)
+                # For stale file check, use the encoded relative path
+                encoded_rel = dest_file.relative_to(dest_instance_dir)
                 # Skip generated index files
-                if rel.name == "index.md":
+                if encoded_rel.name == "index.md":
                     continue
                 # Skip _published/ — managed separately by publish.py
-                if rel.parts and rel.parts[0] == "_published":
+                if encoded_rel.parts and encoded_rel.parts[0] == "_published":
                     continue
-                if rel not in live_rel_paths:
+                if encoded_rel not in live_rel_paths:
                     dest_file.unlink()
                     removed += 1
                     logger.debug("Removed stale file: %s", dest_file)
