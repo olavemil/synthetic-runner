@@ -47,6 +47,7 @@ from library.tools.thrivemind import (
     run_messaging_phase,
     run_spawn_cycle,
     run_thinking_stage,
+    try_adopt_policies,
     save_colony,
     save_colony_snapshot,
     save_constitution,
@@ -479,6 +480,12 @@ def heartbeat(ctx: InstanceContext) -> None:
     if adopted:
         logger.info("Thrivemind constitution adopted; writing constitution.md")
         save_constitution(ctx, proposed)
+        # Try to adopt policy changes from the constitution text
+        new_policies = try_adopt_policies(ctx, proposed, cfg, max_retries=3)
+        if new_policies is not None:
+            policies = new_policies
+            write_process_description(ctx, cfg, policies)
+            logger.info("Thrivemind heartbeat: policy changes adopted from constitution")
     else:
         logger.info("Thrivemind constitution not adopted; skipping constitution.md write")
 

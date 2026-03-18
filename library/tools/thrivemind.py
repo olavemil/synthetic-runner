@@ -13,6 +13,8 @@ from urllib.parse import quote
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+import yaml
+
 from library.harness.sanitize import strip_think_blocks
 from library.tools.identity import (
     AXES,
@@ -349,15 +351,49 @@ def _parse_stages(raw_list: list) -> list[StagePolicy]:
     return stages
 
 
+POLICY_FILE = "policy.yaml"
+
+
 def load_policies(ctx: InstanceContext, cfg: ThrivemindConfig | None = None) -> ThrivemindPolicies:
-    """Load policies from instance config. Falls back to defaults."""
+    """Load policies from instance config, overlaid with colony-adopted policy.yaml.
+
+    Precedence: colony-adopted policy.yaml > instance config > defaults.
+    """
+    # 1. Base policies from instance config
     raw = ctx.config("thrivemind") or {}
     if not isinstance(raw, dict):
-        return ThrivemindPolicies()
-    policies_raw = raw.get("policies", {})
-    if not isinstance(policies_raw, dict):
-        return ThrivemindPolicies()
-    return ThrivemindPolicies.from_dict(policies_raw)
+        raw = {}
+    base_raw = raw.get("policies", {})
+    if not isinstance(base_raw, dict):
+        base_raw = {}
+
+    # 2. Colony-adopted overlay from memory
+    overlay_text = ctx.read(POLICY_FILE)
+    overlay_raw: dict = {}
+    if overlay_text:
+        try:
+            parsed = yaml.safe_load(overlay_text)
+            if isinstance(parsed, dict):
+                overlay_raw = parsed.get("policies", parsed)
+                if not isinstance(overlay_raw, dict):
+                    overlay_raw = {}
+        except yaml.YAMLError as e:
+            logger.warning("Ignoring malformed %s: %s", POLICY_FILE, e)
+
+    # 3. Merge: overlay wins over base
+    merged = _deep_merge(base_raw, overlay_raw)
+    return ThrivemindPolicies.from_dict(merged)
+
+
+def _deep_merge(base: dict, overlay: dict) -> dict:
+    """Recursively merge overlay into base, overlay wins on conflicts."""
+    result = dict(base)
+    for key, value in overlay.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
 
 
 def describe_processes(cfg: ThrivemindConfig, policies: ThrivemindPolicies) -> str:
@@ -446,6 +482,154 @@ def write_process_description(ctx: InstanceContext, cfg: ThrivemindConfig, polic
     """Write processes.md to instance memory for colony self-inspection."""
     content = describe_processes(cfg, policies)
     ctx.write("processes.md", content)
+
+
+# ---------------------------------------------------------------------------
+# Policy extraction & adoption from constitution text
+# ---------------------------------------------------------------------------
+
+_POLICY_FENCE_RE = re.compile(
+    r"```(?:yaml|policies)\s*\n(.*?)```",
+    re.DOTALL,
+)
+
+_POLICY_FIX_PROMPT = """\
+The colony's constitution contained a policies block, but it failed validation:
+
+{error}
+
+Original block:
+```yaml
+{block}
+```
+
+Rewrite the policies block so it is valid YAML matching this schema:
+- on_message.preprocess.enabled: bool
+- on_message.preprocess.prompt_template: string ("default" or custom)
+- on_message.postprocess.enabled: bool
+- on_message.postprocess.prompt_template: string ("default" or custom)
+- thinking.stages: list of {{name, type, prompt_template, ordering, visibility_after, visibility_in_phase}}
+  - type: individual | collective | writer
+  - ordering: cohesion_asc | cohesion_desc | approval_asc | approval_desc | combined_asc | combined_desc | random
+  - visibility_after / visibility_in_phase: private | revealed | incremental | none
+  - max 3 stages
+- thinking.post_spawn: list (same schema, max 2)
+
+Return ONLY the corrected YAML inside a ```yaml fence. No explanation.
+"""
+
+
+def extract_policy_block(constitution_text: str) -> str | None:
+    """Extract a ```yaml or ```policies fenced block from constitution text.
+
+    Returns the raw YAML string, or None if no block found.
+    """
+    match = _POLICY_FENCE_RE.search(constitution_text)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def parse_policy_block(raw_yaml: str) -> tuple[ThrivemindPolicies | None, str]:
+    """Try to parse a YAML string into ThrivemindPolicies.
+
+    Returns (policies, "") on success, or (None, error_message) on failure.
+    """
+    try:
+        parsed = yaml.safe_load(raw_yaml)
+    except yaml.YAMLError as e:
+        return None, f"YAML parse error: {e}"
+
+    if not isinstance(parsed, dict):
+        return None, f"Expected a YAML mapping, got {type(parsed).__name__}"
+
+    # Allow either top-level keys or wrapped in "policies:"
+    policies_dict = parsed.get("policies", parsed)
+    if not isinstance(policies_dict, dict):
+        return None, "Policies block must be a YAML mapping"
+
+    try:
+        policies = ThrivemindPolicies.from_dict(policies_dict)
+    except (ValueError, TypeError) as e:
+        return None, f"Validation error: {e}"
+
+    return policies, ""
+
+
+def try_adopt_policies(
+    ctx: InstanceContext,
+    constitution_text: str,
+    cfg: ThrivemindConfig,
+    max_retries: int = 3,
+) -> ThrivemindPolicies | None:
+    """Extract and validate a policy block from adopted constitution text.
+
+    If the block is invalid, ask the writer to fix it up to max_retries times.
+    On success, writes policy.yaml to memory and returns the new policies.
+    Returns None if no policy block found or all retries exhausted.
+    """
+    raw_block = extract_policy_block(constitution_text)
+    if raw_block is None:
+        logger.info("No policy block found in constitution; skipping policy adoption")
+        return None
+
+    # First attempt
+    policies, error = parse_policy_block(raw_block)
+    if policies is not None:
+        _write_policy_file(ctx, raw_block)
+        logger.info("Policy block adopted from constitution on first attempt")
+        return policies
+
+    # Retry loop: ask writer to fix the block
+    provider, model = parse_model(cfg.writer_model) if cfg.writer_model else (None, "")
+    writer = Identity(name="PolicyFixer", model=model, provider=provider)
+    current_block = raw_block
+    current_error = error
+
+    for attempt in range(1, max_retries + 1):
+        logger.warning(
+            "Policy block validation failed (attempt %d/%d): %s",
+            attempt, max_retries, current_error,
+        )
+        fix_prompt = (
+            _POLICY_FIX_PROMPT
+            .replace("{error}", current_error)
+            .replace("{block}", current_block)
+        )
+        raw_response = generate_with_identity(
+            ctx, writer, fix_prompt,
+            context="Fix the colony's policy YAML so it passes validation.",
+            model=cfg.writer_model,
+            max_tokens=2048,
+        )
+
+        # Extract the fenced block from the response
+        fixed_block = extract_policy_block(f"```yaml\n{raw_response}\n```")
+        if fixed_block is None:
+            # Try the raw response as YAML
+            fixed_block = raw_response.strip()
+
+        policies, current_error = parse_policy_block(fixed_block)
+        if policies is not None:
+            _write_policy_file(ctx, fixed_block)
+            logger.info("Policy block adopted from constitution after %d retry(ies)", attempt)
+            return policies
+        current_block = fixed_block
+
+    logger.warning(
+        "Policy adoption failed after %d retries; keeping existing policies",
+        max_retries,
+    )
+    return None
+
+
+def _write_policy_file(ctx: InstanceContext, raw_yaml: str) -> None:
+    """Write validated policy YAML to the colony's memory."""
+    content = f"# Colony-adopted policies (written by constitution process)\n---\npolicies:\n"
+    # Re-indent the raw YAML under the policies: key
+    for line in raw_yaml.splitlines():
+        content += f"  {line}\n"
+    ctx.write(POLICY_FILE, content)
 
 
 def order_colony(colony: list[Identity], ordering: str, rng: random.Random | None = None) -> list[Identity]:
