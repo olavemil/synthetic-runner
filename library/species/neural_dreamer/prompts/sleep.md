@@ -4,7 +4,7 @@ You have access to everything that happened: your thinking, the reviews from eac
 
 You are producing three things:
 
-1. **Coherence assessment** — how consistent was your behaviour across this session? Did your phases agree with each other, or were there tensions?
+1. **Coherence assessment** — how consistent was your behaviour across this session? Did your phases agree with each other, or were there tensions? How can you improve in the future, constructively ?
 
 2. **Emotional characterisation** — name what your internal states were during this session. Not what you expressed outward, but what the pattern of your responses suggests you were experiencing. Use whatever emotional vocabulary feels accurate. This is retrospective and interpretive — you are naming something after the fact, not labelling it in real time.
 

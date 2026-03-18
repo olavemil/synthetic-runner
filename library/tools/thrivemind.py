@@ -1190,42 +1190,61 @@ def run_spawn_cycle(
 def update_cohesion(
     colony: list[Identity],
     votes: dict[str, list[str]],
-    winner_id: str,
+    winner_ids: str | list[str],
     cfg: ThrivemindConfig,  # noqa: ARG001 kept for API consistency
 ) -> list[Identity]:
     """Update cohesion scores based on message deliberation vote results.
 
     Cohesion measures how closely aligned an individual is with the group
-    consensus. The winner gains +1 cohesion for each voter who backed them.
-    Voters who did not back the winner lose -1 cohesion.
+    consensus. Winners receive cohesion bonuses:
+      - Single winner: +10.0 cohesion
+      - Combined consensus (two winners): +5.0 each
+    Voters who backed a winner: +1.0 cohesion.
+    Voters who did not back any winner: -1.0 cohesion.
     """
     id_map = {ind.name: ind for ind in colony}
     
+    # Normalize winner_ids to a list
+    if isinstance(winner_ids, str):
+        winner_list = [winner_ids] if winner_ids else []
+    else:
+        winner_list = list(winner_ids)
+    winner_set = set(winner_list)
+    
     logger.info(
-        "update_cohesion: winner=%s, voters=%d, colony_size=%d",
-        winner_id, len(votes), len(colony),
+        "update_cohesion: winners=%s, voters=%d, colony_size=%d",
+        winner_list, len(votes), len(colony),
     )
 
-    cohesion_changes = 0
+    # Apply winner bonuses: +10.0 for single winner, +5.0 each for combined
+    bonus = 10.0 if len(winner_list) == 1 else 5.0
+    for winner_id in winner_list:
+        if winner_id in id_map:
+            id_map[winner_id].cohesion += bonus
+            logger.debug("  winner %s → +%.1f cohesion", winner_id, bonus)
+
+    # Apply voter bonuses/penalties
+    cohesion_changes = len(winner_list)  # Count winner bonuses
     for voter_name, ranking in votes.items():
         if not ranking:
             continue
-        top_two = ranking[:2]
-        if winner_id in top_two:
-            if winner_id in id_map:
-                id_map[winner_id].cohesion += 1.0
+        top_two = set(ranking[:2])
+        if winner_set & top_two:
+            # Voter backed a winner → +1.0
+            if voter_name in id_map:
+                id_map[voter_name].cohesion += 1.0
                 cohesion_changes += 1
-                logger.debug("  %s backed winner %s → winner +1.0", voter_name, winner_id)
+                logger.debug("  %s backed winner → voter +1.0", voter_name)
         else:
+            # Voter did not back any winner → -1.0
             if voter_name in id_map:
                 id_map[voter_name].cohesion -= 1.0
                 cohesion_changes += 1
-                logger.debug("  %s did not back winner %s → voter -1.0", voter_name, winner_id)
+                logger.debug("  %s did not back winners %s → voter -1.0", voter_name, winner_list)
 
     logger.info(
-        "update_cohesion: applied %d cohesion changes, winner_cohesion=%.1f",
+        "update_cohesion: applied %d cohesion changes",
         cohesion_changes,
-        id_map.get(winner_id, Identity(name="")).cohesion if winner_id in id_map else 0.0,
     )
 
     return list(id_map.values())
@@ -1351,9 +1370,11 @@ def winner_approval_ratio(result: dict) -> float:
 
 
 def format_consensus_status(
-    result: dict, fallback_coverage: float | None = None
+    result: dict,
+    fallback_coverage: float | None = None,
+    drafters: list[str] | None = None,
 ) -> str:
-    """Format a human-readable consensus status line."""
+    """Format a human-readable consensus status line with drafter attribution."""
     # Use new approval voting consensus field if available
     winner_consensus = result.get("consensus", 0.0)
     if winner_consensus == 0.0:
@@ -1367,11 +1388,24 @@ def format_consensus_status(
     )
     has_combined = bool(result.get("has_combined_consensus", False))
 
+    # Build drafter attribution
+    if drafters and len(drafters) >= 2:
+        drafter_text = f"{drafters[0]} and {drafters[1]}"
+    elif drafters and len(drafters) == 1:
+        drafter_text = drafters[0]
+    else:
+        drafter_text = ""
+
     if has_consensus:
-        return f"Consensus: {winner_pct}% approval."
+        pct = winner_pct
+        if drafter_text:
+            return f"Drafted by {drafter_text} ({pct}% consensus)"
+        return f"Consensus: {pct}% approval."
 
     if has_combined:
         combined_pct = max(0, min(100, int(round(result.get("combined_consensus", 0.0) * 100))))
+        if drafter_text:
+            return f"Drafted by {drafter_text} ({combined_pct}% consensus)"
         return f"Consensus: Combined {combined_pct}% approval (top 2 candidates)."
 
     if fallback_coverage is not None and fallback_coverage > 0:
@@ -1387,4 +1421,4 @@ def format_consensus_status(
 def with_consensus_status(status: str, message: str) -> str:
     """Prepend consensus status to a message body."""
     body = (message or "").strip()
-    return f"{status}\n\n{body}".strip() if body else status
+    return f"{body}\n\n{status}".strip() if body else status

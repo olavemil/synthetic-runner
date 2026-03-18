@@ -656,7 +656,7 @@ def _run_think_phase(ctx: InstanceContext, weights: dict, variables: dict) -> No
     # Distill the core memory files
     memory_distilled = distill_memory(
         ctx,
-        include=["thinking.md", "dreams.md", "concerns_and_ideas.md"],
+        include=["thinking.md", "concerns_and_ideas.md"],
     )
 
     # Keep these inputs as-is (already concise)
@@ -671,7 +671,7 @@ def _run_think_phase(ctx: InstanceContext, weights: dict, variables: dict) -> No
     )
 
     thinking_context = _build_context(
-        ("Your Memory", memory_distilled),
+        ("Your Recent Thoughts", memory_distilled),
         ("Your Sleep Consolidation", sleep_output),
         ("Recent Reviews", reviews),
         ("Representation State", rep_summary),
@@ -746,15 +746,7 @@ def _run_dream_phase(ctx: InstanceContext, weights: dict, variables: dict) -> No
         ["identity"],
     )
 
-    memory_distilled = distill_memory(
-        ctx,
-        include=["thinking.md", "dreams.md", "concerns_and_ideas.md"],
-    )
-    content = _build_context(
-        ("Your Memory", memory_distilled),
-    )
-
-    result = llm_generate(ctx, system=dreaming_system, content=content, max_tokens=4096)
+    result = llm_generate(ctx, system=dreaming_system, content="", max_tokens=4096)
     ctx.write("dreams.md", result)
 
 

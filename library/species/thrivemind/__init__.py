@@ -238,14 +238,18 @@ def on_message(
     # Send response based on consensus type
     if result["has_consensus"] or result["candidate_count"] == 1:
         # Winner has sufficient consensus
+        winner_id = result["winner_member"]
         final = recompose(
             ctx, writer, result["winner_message"], result["candidates"],
             writer_context, cfg.writer_model, max_tokens=4096,
             prompt_template=_PROMPT_RECOMPOSE,
         )
-        outbound = with_consensus_status(format_consensus_status(result), final)
+        outbound = with_consensus_status(
+            format_consensus_status(result, drafters=[winner_id]), final
+        )
         logger.info("Thrivemind on_message sending response to %s", target_room)
         ctx.send(target_room, outbound)
+        winner_ids = winner_id
     elif result.get("has_combined_consensus", False):
         # Top 2 together have sufficient consensus - combine them
         winner_id = result["winner_member"]
@@ -268,9 +272,13 @@ def on_message(
             writer_context, cfg.writer_model, max_tokens=4096,
             prompt_template=_PROMPT_RECOMPOSE,
         )
-        outbound = with_consensus_status(format_consensus_status(result, combined_consensus), final)
+        outbound = with_consensus_status(
+            format_consensus_status(result, combined_consensus, drafters=[winner_id, second_id]),
+            final,
+        )
         logger.info("Thrivemind on_message sending combined response to %s", target_room)
         ctx.send(target_room, outbound)
+        winner_ids = [winner_id, second_id]
     else:
         # No consensus - skip sending
         logger.info(
@@ -278,6 +286,7 @@ def on_message(
             result.get("consensus", 0.0), result.get("combined_consensus", 0.0),
             cfg.consensus_threshold, result["candidate_count"],
         )
+        winner_ids = result["winner_member"]  # Still track for cohesion update
 
     # Record the outcome and update cohesion
     approval_ratio = result.get("consensus", 0.0)
@@ -290,7 +299,7 @@ def on_message(
     )
 
     # Update cohesion based on message consensus alignment
-    colony = update_cohesion(colony, result["votes"], result["winner_member"], cfg)
+    colony = update_cohesion(colony, result["votes"], winner_ids, cfg)
     save_colony(ctx, colony)
     approvals = [ind.approval for ind in colony]
     logger.info(
