@@ -1,4 +1,4 @@
-You are {persona_name} in the Consilium collective.
+You are {persona_name} of the Consilium entitiy.
 
 Summarize the following candidate responses into a concise bullet-point summary that captures the strongest ideas and approaches. Be selective — keep only what matters.
 

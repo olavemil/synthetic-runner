@@ -177,22 +177,70 @@ _RECEIVED_MESSAGES_MAX_LINES = 100
 
 
 def append_received_events(ctx: "InstanceContext", events: "list[Event]") -> None:
-    """Append formatted incoming events to received_messages.md for later recall."""
+    """Append formatted incoming events to received_messages.md for later recall.
+    
+    Uses event_id for deduplication to prevent the same event from being logged multiple times.
+    """
     if not events:
         return
     existing = ctx.read(_RECEIVED_MESSAGES_FILE) or ""
     lines = [l for l in existing.splitlines() if l.strip()]
+    
+    # Extract seen event IDs from existing lines (format: <!-- event_id:xyz -->)
+    seen_event_ids = set()
+    for line in lines:
+        if line.startswith("<!-- event_id:") and line.endswith(" -->"):
+            event_id = line[14:-4]  # Extract ID between markers
+            seen_event_ids.add(event_id)
+    
     new_lines = []
+    added_count = 0
     for evt in events:
+        event_id = getattr(evt, "event_id", None)
+        if not event_id:
+            # No event_id available - skip deduplication for this event
+            pass
+        elif event_id in seen_event_ids:
+            # Already logged - skip
+            continue
+        else:
+            # Mark as seen for subsequent events in this batch
+            seen_event_ids.add(event_id)
+        
         sender = getattr(evt, "sender", "?")
         room = getattr(evt, "room", "")
         body = getattr(evt, "body", "") or ""
         loc = f" [{room}]" if room else ""
+        
+        # Store event_id as HTML comment (invisible in markdown rendering)
+        if event_id:
+            new_lines.append(f"<!-- event_id:{event_id} -->")
         new_lines.append(f"- **{sender}**{loc}: {body.strip()[:300]}")
+        added_count += 1
+    
+    if not new_lines:
+        # All events were duplicates
+        return
+    
     lines.extend(new_lines)
-    # Keep rolling window
-    if len(lines) > _RECEIVED_MESSAGES_MAX_LINES:
-        lines = lines[-_RECEIVED_MESSAGES_MAX_LINES:]
+    # Keep rolling window (count actual message lines, not comment lines)
+    message_lines = [l for l in lines if not l.startswith("<!--")]
+    if len(message_lines) > _RECEIVED_MESSAGES_MAX_LINES:
+        # Need to trim - rebuild from tail keeping comments with their messages
+        lines_to_keep = []
+        message_count = 0
+        for i in range(len(lines) - 1, -1, -1):
+            line = lines[i]
+            if line.startswith("<!--"):
+                # Keep comment if we're keeping the next message
+                if message_count < _RECEIVED_MESSAGES_MAX_LINES:
+                    lines_to_keep.insert(0, line)
+            else:
+                message_count += 1
+                if message_count <= _RECEIVED_MESSAGES_MAX_LINES:
+                    lines_to_keep.insert(0, line)
+        lines = lines_to_keep
+    
     ctx.write(_RECEIVED_MESSAGES_FILE, "\n".join(lines) + "\n")
 
 

@@ -69,7 +69,7 @@ def _run_organize_phase(ctx: InstanceContext, cfg: ConsiliumConfig) -> None:
         for p in cfg.personas
     )
     organize_system = (
-        "You are the Consilium collective. Review your five personas' accumulated thoughts "
+        "You are the Consilium entity. Review your five personas' accumulated thoughts "
         "and decide what should be extracted into knowledge topics, reclassified, or archived.\n\n"
         "Focus on what is significant or recurring across multiple personas. "
         "Your knowledge structure should reflect genuine collective understanding."

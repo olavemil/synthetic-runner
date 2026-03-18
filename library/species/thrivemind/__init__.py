@@ -220,7 +220,6 @@ def on_message(
             message_summary=message_summary,
             events_text=events_text,
         )
-    clear_events(ctx)
     logger.info("Thrivemind on_message generated per-individual reflections=%d", len(individual_contexts))
 
     run_messaging_phase(ctx, colony, cfg)
@@ -379,7 +378,6 @@ def heartbeat(ctx: InstanceContext) -> None:
         generate_descriptor(ctx, individual, cfg, reflection=reflection, inbox_text=inbox_text)
         clear_inbox(ctx, individual)
         individual_reflections[individual.name] = reflection
-    clear_events(ctx)
     logger.info("Thrivemind heartbeat generated per-individual reflections=%d", len(individual_reflections))
 
     run_messaging_phase(ctx, colony, cfg)
@@ -518,6 +516,9 @@ def heartbeat(ctx: InstanceContext) -> None:
         archive_removed_individual(ctx, name, cause)
     if removed or spawned:
         record_spawn_event(ctx, removed=removed, spawned=spawned, colony_size=len(colony))
+
+    # Clear colony events after spawn cycle completes (events accumulate across all cycles until spawn)
+    clear_events(ctx)
 
     save_colony(ctx, colony)
     save_colony_snapshot(ctx, colony)
