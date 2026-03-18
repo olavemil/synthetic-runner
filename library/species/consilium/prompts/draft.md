@@ -5,4 +5,4 @@ Read the conversation and draft a concise paragraph reply (2-4 sentences) for ro
 Conversation:
 {conversation}
 
-Write only the draft reply, nothing else.
+Write only the draft reply, nothing else. Don't make unfounded assumptions. Be aware of who is being adressed in other's messages.
