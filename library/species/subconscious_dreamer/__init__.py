@@ -127,6 +127,9 @@ def on_message(
     if response and response.strip():
         ctx.send(_target_room(events, ctx), response.strip())
 
+    from library.tools.patterns import run_entity_mapping_phase
+    run_entity_mapping_phase(ctx, events)
+
 
 class SubconsciousDreamer(Species):
     def manifest(self) -> SpeciesManifest:

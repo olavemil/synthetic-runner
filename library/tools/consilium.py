@@ -25,6 +25,7 @@ _PROMPT_MERGE = (_SPECIES_DIR / "prompts/merge.md").read_text()
 _PROMPT_TRANSFORM = (_SPECIES_DIR / "prompts/transform.md").read_text()
 _PROMPT_REVIEW = (_SPECIES_DIR / "prompts/review.md").read_text()
 _PROMPT_SUBCONSCIOUS = (_SPECIES_DIR / "prompts/subconscious.md").read_text()
+_PROMPT_GHOST_REVIEW = (_SPECIES_DIR / "prompts/ghost_review.md").read_text()
 
 
 @dataclass
@@ -121,12 +122,15 @@ def build_thinking_context(
     persona_mem: dict[str, str],
     others_thoughts: dict[str, str],
     own_name: str,
+    recent_msgs: str = "",
 ) -> str:
     """Build initial message for a persona's thinking session."""
     parts = []
     ctx_str = build_shared_context(shared)
     if ctx_str:
         parts.append(ctx_str)
+    if recent_msgs.strip():
+        parts.append(f"## Messages Received Since Last Thinking\n{recent_msgs.strip()}")
     if persona_mem.get("subconscious"):
         parts.append(f"## Your Subconscious\n{persona_mem['subconscious']}")
     if persona_mem.get("reviews"):
@@ -178,12 +182,16 @@ def run_drafting_phase(
     conversation: str,
     target_room: str,
     context: str,
+    persona_extra_context: str = "",
 ) -> list[tuple[str, str]]:
     """Phase 1: 5 persona drafts + 3 ghost one-liners = up to 8 candidates.
 
     Returns list of (author_id, text) tuples.
+    persona_extra_context: additional context injected for persona drafts only (not ghost).
     """
     candidates: list[tuple[str, str]] = []
+
+    persona_context = (context + "\n\n" + persona_extra_context).strip() if persona_extra_context else context
 
     for persona in cfg.personas:
         prompt = (
@@ -193,10 +201,12 @@ def run_drafting_phase(
             .replace("{persona_name}", persona.name)
         )
         draft = generate_with_identity(
-            ctx, persona, prompt, context=context, max_tokens=2048,
+            ctx, persona, prompt, context=persona_context, max_tokens=2048,
         )
         if draft.strip():
             candidates.append((persona.name, draft.strip()))
+        else:
+            logger.warning("Consilium drafting: empty draft from persona %s", persona.name)
 
     ghost_prompt = (
         _PROMPT_GHOST_DRAFT
@@ -206,10 +216,13 @@ def run_drafting_phase(
     ghost_raw = generate_with_identity(
         ctx, cfg.ghost, ghost_prompt, context=context, max_tokens=1024,
     )
-    for i, line in enumerate(_parse_ghost_lines(ghost_raw)[:3]):
+    ghost_lines = _parse_ghost_lines(ghost_raw)[:3]
+    if not ghost_lines:
+        logger.warning("Consilium drafting: ghost produced no lines (raw=%d chars)", len(ghost_raw))
+    for i, line in enumerate(ghost_lines):
         candidates.append((f"Ghost-{i + 1}", line))
 
-    logger.info("Consilium drafting: %d candidates", len(candidates))
+    logger.info("Consilium drafting: %d candidates (personas=%d ghost=%d)", len(candidates), len(cfg.personas), len(ghost_lines))
     return candidates
 
 
@@ -343,6 +356,62 @@ def run_review_phase(
             ctx.write(fname, "\n".join(lines) + "\n")
 
     logger.info("Consilium review: %d personas reviewed", len(cfg.personas))
+
+
+def load_ghost_context(ctx: "InstanceContext", cfg: ConsiliumConfig) -> str:
+    """Load ideas.md and recommendations.md for injection into persona drafts."""
+    parts = []
+    ideas = ctx.read("ideas.md")
+    if ideas and ideas.strip():
+        parts.append(f"## Ideas\n{ideas.strip()}")
+    recs = ctx.read("recommendations.md")
+    if recs and recs.strip():
+        parts.append(f"## Recommendations\n{recs.strip()}")
+    return "\n\n".join(parts)
+
+
+def run_ghost_review_phase(
+    ctx: "InstanceContext",
+    cfg: ConsiliumConfig,
+    meta_thinking: str,
+) -> None:
+    """Ghost subconscious review: reads persona thinking + meta-thinking + memory,
+    then updates ideas.md and recommendations.md with short bullet lists.
+    """
+    import json as _json
+
+    shared = load_shared_memory(ctx)
+    context_parts = []
+    if shared.get("memory.md"):
+        context_parts.append(f"## Memory\n{shared['memory.md']}")
+    if shared.get("constitution.md"):
+        context_parts.append(f"## Constitution\n{shared['constitution.md']}")
+    if meta_thinking.strip():
+        context_parts.append(f"## Persona Thinking\n{meta_thinking.strip()}")
+    context = "\n\n".join(context_parts)
+
+    raw = generate_with_identity(
+        ctx, cfg.ghost, _PROMPT_GHOST_REVIEW,
+        context=context, max_tokens=1024,
+    )
+
+    try:
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0]
+        data = _json.loads(cleaned)
+        ideas = str(data.get("ideas", "")).strip()
+        recs = str(data.get("recommendations", "")).strip()
+        if ideas:
+            ctx.write("ideas.md", ideas + "\n")
+        if recs:
+            ctx.write("recommendations.md", recs + "\n")
+        logger.info(
+            "Consilium ghost review: updated ideas.md (%d chars) recommendations.md (%d chars)",
+            len(ideas), len(recs),
+        )
+    except Exception as exc:
+        logger.warning("Consilium ghost review: failed to parse output (%s)", exc)
 
 
 def update_persona_subconscious(

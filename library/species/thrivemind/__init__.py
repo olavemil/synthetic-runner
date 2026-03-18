@@ -20,6 +20,7 @@ from library.tools.thrivemind import (
     build_reflection_context,
     clear_events,
     clear_inbox,
+    read_inbox,
     format_consensus_status,
     format_events_for_context,
     increment_ages,
@@ -31,6 +32,7 @@ from library.tools.thrivemind import (
     load_reflection,
     pick_fallback_candidate_ids,
     archive_removed_individual,
+    generate_descriptor,
     record_constitution_event,
     record_reply_event,
     record_spawn_event,
@@ -57,7 +59,14 @@ from library.tools.thrivemind import (
 )
 from library.tools.identity import Identity, parse_model
 from library.tools.deliberate import deliberate, recompose
-from library.tools.prompts import format_events, get_entity_id, select_target_room
+from library.tools.prompts import (
+    append_received_events,
+    clear_received_messages,
+    format_events,
+    get_entity_id,
+    load_received_messages,
+    select_target_room,
+)
 
 if TYPE_CHECKING:
     from library.harness.adapters import Event
@@ -154,7 +163,12 @@ def on_message(
     constitution = load_constitution(ctx)
     conversation = format_events(scoped_events, self_entity_id=get_entity_id(ctx))
     prompt = _PROMPT_CANDIDATE.replace("{conversation}", conversation)
+    # Capture prior messages before recording current events
+    prior_received = load_received_messages(ctx)
+    append_received_events(ctx, events)
     message_summary = summarize_message_history(ctx, scoped_events, cfg)
+    if prior_received.strip():
+        message_summary = f"## Prior Messages\n{prior_received.strip()}\n\n{message_summary}" if message_summary else f"## Prior Messages\n{prior_received.strip()}"
     colony_md = ctx.read("colony.md") or build_colony_snapshot(colony)
     colony_events = load_events(ctx)
     events_text = format_events_for_context(colony_events)
@@ -284,6 +298,9 @@ def on_message(
         min(approvals) if approvals else 0, max(approvals) if approvals else 0, len(colony),
     )
 
+    from library.tools.patterns import run_entity_mapping_phase
+    run_entity_mapping_phase(ctx, events)
+
 
 def heartbeat(ctx: InstanceContext) -> None:
     """Constitution update and spawn cycle."""
@@ -301,6 +318,8 @@ def heartbeat(ctx: InstanceContext) -> None:
     constitution = load_constitution(ctx)
     colony_events = load_events(ctx)
     events_text = format_events_for_context(colony_events)
+    recent_msgs = load_received_messages(ctx)
+    clear_received_messages(ctx)
 
     # Generate per-individual reflections in randomized order to prevent precedence bias
     individual_reflections: dict[str, str] = {}
@@ -308,11 +327,13 @@ def heartbeat(ctx: InstanceContext) -> None:
     random.shuffle(shuffled_colony)
     for individual in shuffled_colony:
         prior_reflection = load_reflection(ctx, individual)
+        inbox_text = read_inbox(ctx, individual)
         reflection = reflect_on_colony(
             ctx, cfg, individual, colony, constitution,
-            prior_reflection, "", events_text=events_text,
+            prior_reflection, recent_msgs, events_text=events_text,
         )
         save_reflection(ctx, individual, reflection)
+        generate_descriptor(ctx, individual, cfg, reflection=reflection, inbox_text=inbox_text)
         clear_inbox(ctx, individual)
         individual_reflections[individual.name] = reflection
     clear_events(ctx)
@@ -412,12 +433,13 @@ def heartbeat(ctx: InstanceContext) -> None:
 
     # Spawn cycle
     old_names = [ind.name for ind in colony]
-    colony = run_spawn_cycle(colony, cfg)
+    colony, removal_causes = run_spawn_cycle(colony, cfg)
     new_names = {ind.name for ind in colony}
     removed = [n for n in old_names if n not in new_names]
     spawned = len(new_names - set(old_names))
     for name in removed:
-        archive_removed_individual(ctx, name)
+        cause = removal_causes.get(name, "removed")
+        archive_removed_individual(ctx, name, cause)
     if removed or spawned:
         record_spawn_event(ctx, removed=removed, spawned=spawned, colony_size=len(colony))
 
@@ -429,6 +451,10 @@ def heartbeat(ctx: InstanceContext) -> None:
 
     # Creative phase: artifact creation using colony heritage
     _run_creative_phase(ctx, cfg)
+
+    # Publish graph, map, and creations to data repo
+    from library.publish import render_and_publish
+    render_and_publish(ctx)
 
 
 class ThrivemindSpecies(Species):

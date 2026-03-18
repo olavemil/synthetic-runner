@@ -158,6 +158,9 @@ def on_message(
         ctx.write(f"{v.name.lower()}_subconscious.md", new_sub)
     logger.info("Hecate on_message completed subconscious updates (voices=%d)", len(cfg.voices))
 
+    from library.tools.patterns import run_entity_mapping_phase
+    run_entity_mapping_phase(ctx, events)
+
 
 def _run_organize_phase(ctx: InstanceContext, cfg: "HecateConfig") -> None:
     """Knowledge organization phase: tool-use session with organize + graph + map tools."""

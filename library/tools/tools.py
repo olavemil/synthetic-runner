@@ -171,6 +171,21 @@ def make_tools(ctx: InstanceContext, options: dict | None = None) -> list[dict]:
             },
         })
 
+    tools.append({
+        "type": "function",
+        "function": {
+            "name": "read_recent_messages",
+            "description": (
+                "Read messages received since the last heartbeat cycle. "
+                "Use this to catch up on what was said while you were not actively thinking."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    })
+
     if opts.get("graph", False):
         from library.tools.graph import GRAPH_TOOL_SCHEMAS
         tools.extend(GRAPH_TOOL_SCHEMAS)
@@ -260,6 +275,11 @@ def handle_tool(ctx: InstanceContext, name: str, arguments: dict) -> tuple[str, 
         config_block = "\n".join(config_lines)
         result = f"{desc}\n\n---\n\n## Instance Config\n\n{config_block}"
         return result, False
+
+    if name == "read_recent_messages":
+        from library.tools.prompts import load_received_messages
+        content = load_received_messages(ctx)
+        return content or "(no recent messages)", False
 
     if name == "done":
         summary = arguments.get("summary", "Done.")

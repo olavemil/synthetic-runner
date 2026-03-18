@@ -327,6 +327,81 @@ topics of interest, and anything noteworthy. Keep it concise."""
             ctx.write(rel_path, response.message.strip())
 
 
+def run_entity_mapping_phase(
+    ctx: InstanceContext,
+    events: list[Event] | None = None,
+) -> None:
+    """Update entity knowledge after responding to messages.
+
+    For each unique sender in events, reads existing notes from
+    ``knowledge/entities/{sender}.md`` and updates them with observations
+    from the current interaction. Covers identity, personality, inter-entity
+    relationships, and the quality of our relationship with them.
+
+    Prefers updating existing entries over creating duplicates.
+    """
+    senders = set()
+    if events:
+        for evt in events:
+            if evt.sender:
+                senders.add(evt.sender)
+
+    if not senders:
+        return
+
+    all_senders = sorted(senders)
+
+    for sender in all_senders:
+        entity_path = f"knowledge/entities/{sender}.md"
+        existing = ctx.read(entity_path)
+
+        events_from_sender = [e for e in (events or []) if e.sender == sender]
+        events_text = format_events(events_from_sender)
+
+        # Build a brief summary of the other known entities for relationship context
+        other_senders = [s for s in all_senders if s != sender]
+        others_note = (
+            f"Other entities in this conversation: {', '.join(other_senders)}."
+            if other_senders
+            else ""
+        )
+
+        system = (
+            "You are updating your knowledge notes about a person or entity. "
+            "Incorporate observations from recent interactions. "
+            "Be specific and concise. Prefer updating existing information over repeating it."
+        )
+
+        existing_block = existing or "(no existing notes)"
+        others_block = f"\n\n{others_note}" if others_note else ""
+
+        user_msg = f"""## Entity: {sender}
+
+## Existing Notes
+{existing_block}
+
+## Recent Interaction
+{events_text}{others_block}
+
+Update the notes about {sender}. Cover:
+- Who they are and their role/background
+- Personality, communication style, interests
+- How they relate to other entities (if observable)
+- The quality and nature of our relationship
+
+Keep notes concise and factual. Update existing entries rather than duplicating."""
+
+        response = ctx.llm(
+            messages=[{"role": "user", "content": user_msg}],
+            system=system,
+            max_tokens=1024,
+            caller="entity_mapping",
+        )
+
+        if response.message.strip():
+            ctx.write(entity_path, response.message.strip())
+
+
 def distill_memory(
     ctx: InstanceContext,
     exclude: list[str] | None = None,
