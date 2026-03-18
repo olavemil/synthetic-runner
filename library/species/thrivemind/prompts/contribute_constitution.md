@@ -5,6 +5,7 @@ Current constitution:
 {constitution}
 {reflections_block}
 Propose exactly one new principle or refinement.
+This may be a value, a governance principle, or a process change (e.g., how the colony thinks or deliberates).
 Constraints:
 
 - Keep this limited to 1 line.
