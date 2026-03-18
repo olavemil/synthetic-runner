@@ -10,6 +10,7 @@ import time
 import uuid
 from pathlib import Path
 from urllib.parse import quote
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from library.harness.sanitize import strip_think_blocks
@@ -165,6 +166,500 @@ class ThrivemindConfig:
     def colony_size(self) -> int:
         """Backward-compat: return max_colony_size as the target."""
         return self.max_colony_size
+
+
+# ---------------------------------------------------------------------------
+# Policy dataclasses — customizable colony behavior
+# ---------------------------------------------------------------------------
+
+# Valid ordering schemes for thinking stages
+ORDERING_SCHEMES = frozenset({
+    "cohesion_asc", "cohesion_desc",
+    "approval_asc", "approval_desc",
+    "combined_asc", "combined_desc",
+    "random",
+})
+
+# Valid visibility options
+VISIBILITY_OPTIONS = frozenset({"private", "revealed", "incremental", "none"})
+
+# Stage types
+STAGE_TYPES = frozenset({"individual", "collective", "writer"})
+
+# Sentinel for "use built-in prompt"
+DEFAULT_PROMPT = "default"
+
+
+@dataclass
+class StagePolicy:
+    """One stage in a multi-stage thinking pipeline."""
+    name: str
+    stage_type: str = "individual"  # individual | collective | writer
+    prompt_template: str = DEFAULT_PROMPT
+    ordering: str = "random"
+    visibility_after: str = "revealed"
+    visibility_in_phase: str = "none"  # for collective stages
+
+    def __post_init__(self) -> None:
+        if self.stage_type not in STAGE_TYPES:
+            raise ValueError(f"Invalid stage_type {self.stage_type!r}; must be one of {sorted(STAGE_TYPES)}")
+        if self.ordering not in ORDERING_SCHEMES:
+            raise ValueError(f"Invalid ordering {self.ordering!r}; must be one of {sorted(ORDERING_SCHEMES)}")
+        if self.visibility_after not in VISIBILITY_OPTIONS:
+            raise ValueError(f"Invalid visibility_after {self.visibility_after!r}; must be one of {sorted(VISIBILITY_OPTIONS)}")
+        if self.visibility_in_phase not in VISIBILITY_OPTIONS:
+            raise ValueError(f"Invalid visibility_in_phase {self.visibility_in_phase!r}; must be one of {sorted(VISIBILITY_OPTIONS)}")
+
+
+@dataclass
+class PreprocessPolicy:
+    """Controls how incoming messages are summarized before colony deliberation."""
+    enabled: bool = True
+    prompt_template: str = DEFAULT_PROMPT
+
+
+@dataclass
+class PostprocessPolicy:
+    """Controls how the winning candidate is rewritten before sending."""
+    enabled: bool = True
+    prompt_template: str = DEFAULT_PROMPT
+
+
+@dataclass
+class OnMessagePolicy:
+    """Policy for the on_message entry point."""
+    preprocess: PreprocessPolicy = field(default_factory=PreprocessPolicy)
+    postprocess: PostprocessPolicy = field(default_factory=PostprocessPolicy)
+
+
+@dataclass
+class ThinkingPolicy:
+    """Policy for the heartbeat thinking/constitution phase."""
+    stages: list[StagePolicy] = field(default_factory=list)
+    post_spawn: list[StagePolicy] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if len(self.stages) > 3:
+            raise ValueError(f"At most 3 pre-voting stages allowed, got {len(self.stages)}")
+        if len(self.post_spawn) > 2:
+            raise ValueError(f"At most 2 post-spawn stages allowed, got {len(self.post_spawn)}")
+
+
+@dataclass
+class ThrivemindPolicies:
+    """Top-level policy container for a Thrivemind instance."""
+    on_message: OnMessagePolicy = field(default_factory=OnMessagePolicy)
+    thinking: ThinkingPolicy = field(default_factory=ThinkingPolicy)
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> ThrivemindPolicies:
+        """Parse policies from a raw config dict (YAML).
+
+        Missing keys fall back to defaults (today's behavior).
+        """
+        if not raw or not isinstance(raw, dict):
+            return cls()
+
+        # Parse on_message policy
+        om_raw = raw.get("on_message", {})
+        if not isinstance(om_raw, dict):
+            om_raw = {}
+        pre_raw = om_raw.get("preprocess", {})
+        post_raw = om_raw.get("postprocess", {})
+        on_message = OnMessagePolicy(
+            preprocess=PreprocessPolicy(
+                enabled=bool(pre_raw.get("enabled", True)) if isinstance(pre_raw, dict) else True,
+                prompt_template=str(pre_raw.get("prompt_template", DEFAULT_PROMPT)) if isinstance(pre_raw, dict) else DEFAULT_PROMPT,
+            ),
+            postprocess=PostprocessPolicy(
+                enabled=bool(post_raw.get("enabled", True)) if isinstance(post_raw, dict) else True,
+                prompt_template=str(post_raw.get("prompt_template", DEFAULT_PROMPT)) if isinstance(post_raw, dict) else DEFAULT_PROMPT,
+            ),
+        )
+
+        # Parse thinking policy
+        th_raw = raw.get("thinking", {})
+        if not isinstance(th_raw, dict):
+            th_raw = {}
+        stages = _parse_stages(th_raw.get("stages", []))
+        post_spawn = _parse_stages(th_raw.get("post_spawn", []))
+        thinking = ThinkingPolicy(stages=stages, post_spawn=post_spawn)
+
+        return cls(on_message=on_message, thinking=thinking)
+
+    def describe(self) -> str:
+        """Return a human-readable description of current policies."""
+        lines: list[str] = ["# Active Policies\n"]
+
+        lines.append("## on_message\n")
+        pre = self.on_message.preprocess
+        lines.append(f"- preprocess: {'enabled' if pre.enabled else 'disabled'}")
+        if pre.enabled and pre.prompt_template != DEFAULT_PROMPT:
+            lines.append(f"  prompt: {pre.prompt_template[:80]}...")
+        post = self.on_message.postprocess
+        lines.append(f"- postprocess: {'enabled' if post.enabled else 'disabled'}")
+        if post.enabled and post.prompt_template != DEFAULT_PROMPT:
+            lines.append(f"  prompt: {post.prompt_template[:80]}...")
+
+        lines.append("\n## thinking\n")
+        if self.thinking.stages:
+            lines.append(f"- {len(self.thinking.stages)} pre-voting stage(s):")
+            for s in self.thinking.stages:
+                custom = " (custom prompt)" if s.prompt_template != DEFAULT_PROMPT else ""
+                lines.append(f"  - {s.name}: type={s.stage_type}, ordering={s.ordering}, "
+                             f"visibility_after={s.visibility_after}{custom}")
+        else:
+            lines.append("- stages: default (single contribution + synthesis)")
+
+        if self.thinking.post_spawn:
+            lines.append(f"- {len(self.thinking.post_spawn)} post-spawn stage(s):")
+            for s in self.thinking.post_spawn:
+                lines.append(f"  - {s.name}: type={s.stage_type}")
+        else:
+            lines.append("- post_spawn: none")
+
+        return "\n".join(lines)
+
+
+def _parse_stages(raw_list: list) -> list[StagePolicy]:
+    """Parse a list of stage dicts into StagePolicy objects."""
+    if not isinstance(raw_list, list):
+        return []
+    stages = []
+    for item in raw_list:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", f"stage_{len(stages)}"))
+        stage_type = str(item.get("type", item.get("stage_type", "individual")))
+        prompt_template = str(item.get("prompt_template", DEFAULT_PROMPT))
+        ordering = str(item.get("ordering", "random"))
+        visibility_after = str(item.get("visibility_after", "revealed"))
+        visibility_in_phase = str(item.get("visibility_in_phase", "none"))
+        try:
+            stages.append(StagePolicy(
+                name=name,
+                stage_type=stage_type,
+                prompt_template=prompt_template,
+                ordering=ordering,
+                visibility_after=visibility_after,
+                visibility_in_phase=visibility_in_phase,
+            ))
+        except ValueError as e:
+            logger.warning("Skipping invalid stage %r: %s", name, e)
+    return stages
+
+
+def load_policies(ctx: InstanceContext, cfg: ThrivemindConfig | None = None) -> ThrivemindPolicies:
+    """Load policies from instance config. Falls back to defaults."""
+    raw = ctx.config("thrivemind") or {}
+    if not isinstance(raw, dict):
+        return ThrivemindPolicies()
+    policies_raw = raw.get("policies", {})
+    if not isinstance(policies_raw, dict):
+        return ThrivemindPolicies()
+    return ThrivemindPolicies.from_dict(policies_raw)
+
+
+def describe_processes(cfg: ThrivemindConfig, policies: ThrivemindPolicies) -> str:
+    """Generate a human-readable description of the colony's active processes.
+
+    Written to processes.md so colony members can inspect their own governance.
+    """
+    lines: list[str] = ["# Colony Processes\n"]
+
+    # Colony configuration
+    lines.append("## Configuration\n")
+    lines.append(f"- Colony size: {cfg.min_colony_size}–{cfg.max_colony_size}")
+    lines.append(f"- Suggestion fraction: {cfg.suggestion_fraction:.0%}")
+    lines.append(f"- Consensus threshold: {cfg.consensus_threshold:.0%}")
+    lines.append(f"- Approval threshold: {cfg.approval_threshold}")
+    lines.append(f"- Voice space: {cfg.voice_space}")
+    if cfg.suggestion_model:
+        lines.append(f"- Suggestion model: {cfg.suggestion_model}")
+    if cfg.writer_model:
+        lines.append(f"- Writer model: {cfg.writer_model}")
+
+    # on_message flow
+    lines.append("\n## on_message Flow\n")
+    lines.append("```")
+    pre = policies.on_message.preprocess
+    if pre.enabled:
+        if pre.prompt_template != "default":
+            lines.append("1. PREPROCESS (custom) → reframe incoming messages")
+        else:
+            lines.append("1. PREPROCESS (default) → summarize message history")
+    else:
+        lines.append("1. PREPROCESS: disabled")
+    lines.append("2. REFLECT → each individual reflects on colony state")
+    lines.append("3. MESSAGING → internal colony messaging phase")
+    lines.append("4. DELIBERATE → suggesters propose, all vote (Borda)")
+    post = policies.on_message.postprocess
+    if post.enabled:
+        if post.prompt_template != "default":
+            lines.append("5. RECOMPOSE + POSTPROCESS (custom) → refine response")
+        else:
+            lines.append("5. RECOMPOSE (default) → unified colony voice")
+    else:
+        lines.append("5. RECOMPOSE: postprocessing disabled")
+    lines.append("6. SEND → deliver to voice space")
+    lines.append("```")
+
+    # Heartbeat flow
+    lines.append("\n## heartbeat Flow\n")
+    lines.append("```")
+    lines.append("1. REFLECT → per-individual reflections (randomized order)")
+    lines.append("2. MESSAGING → internal colony messaging phase")
+
+    thinking_stages = policies.thinking.stages
+    if thinking_stages:
+        lines.append(f"3. THINKING ({len(thinking_stages)} stage(s)):")
+        for i, s in enumerate(thinking_stages, 1):
+            vis = f", visibility_after={s.visibility_after}" if s.visibility_after != "revealed" else ""
+            vis_in = f", visibility_in_phase={s.visibility_in_phase}" if s.visibility_in_phase != "none" else ""
+            custom = " [custom prompt]" if s.prompt_template != "default" else ""
+            lines.append(f"   3.{i}. {s.name}: type={s.stage_type}, ordering={s.ordering}{vis}{vis_in}{custom}")
+    else:
+        lines.append("3. CONTRIBUTE → each individual proposes one principle")
+
+    lines.append("4. REWRITE → colony writer synthesizes constitution draft")
+    lines.append("5. VOTE → round 1 (+ round 2 if needed)")
+    lines.append("6. PEER APPROVAL → each individual endorses 2 others")
+    lines.append("7. SPAWN CYCLE → eligible individuals reproduce")
+
+    post_spawn = policies.thinking.post_spawn
+    if post_spawn:
+        lines.append(f"8. POST-SPAWN ({len(post_spawn)} stage(s)):")
+        for i, s in enumerate(post_spawn, 1):
+            lines.append(f"   8.{i}. {s.name}: type={s.stage_type}, ordering={s.ordering}")
+
+    lines.append("9. ORGANIZE → knowledge organization")
+    lines.append("10. CREATE → artifact creation")
+    lines.append("```")
+
+    # Active policies detail
+    lines.append("\n" + policies.describe())
+
+    return "\n".join(lines)
+
+
+def write_process_description(ctx: InstanceContext, cfg: ThrivemindConfig, policies: ThrivemindPolicies) -> None:
+    """Write processes.md to instance memory for colony self-inspection."""
+    content = describe_processes(cfg, policies)
+    ctx.write("processes.md", content)
+
+
+def order_colony(colony: list[Identity], ordering: str, rng: random.Random | None = None) -> list[Identity]:
+    """Return colony members sorted by the given ordering scheme."""
+    rng = rng or random.Random()
+    if ordering == "random":
+        result = list(colony)
+        rng.shuffle(result)
+        return result
+    if ordering == "cohesion_asc":
+        return sorted(colony, key=lambda i: i.cohesion)
+    if ordering == "cohesion_desc":
+        return sorted(colony, key=lambda i: i.cohesion, reverse=True)
+    if ordering == "approval_asc":
+        return sorted(colony, key=lambda i: i.approval)
+    if ordering == "approval_desc":
+        return sorted(colony, key=lambda i: i.approval, reverse=True)
+    if ordering == "combined_asc":
+        return sorted(colony, key=lambda i: i.cohesion * (i.approval + 1))
+    if ordering == "combined_desc":
+        return sorted(colony, key=lambda i: i.cohesion * (i.approval + 1), reverse=True)
+    # Fallback: random
+    result = list(colony)
+    rng.shuffle(result)
+    return result
+
+
+def run_thinking_stage(
+    ctx: InstanceContext,
+    colony: list[Identity],
+    cfg: ThrivemindConfig,
+    stage: StagePolicy,
+    constitution: str,
+    reflections: dict[str, str],
+    prior_stage_outputs: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Execute a single thinking stage. Returns {individual_name: output} dict.
+
+    Stage types:
+      - individual: each person writes independently to their own doc
+      - collective: ordered access to a shared document
+      - writer: colony writer synthesizes from prior stage outputs
+    """
+    ordered = order_colony(colony, stage.ordering)
+    outputs: dict[str, str] = {}
+
+    # Resolve prompt template
+    prompt_base = stage.prompt_template
+    if prompt_base == DEFAULT_PROMPT:
+        prompt_base = (
+            "You are {individual_name}, a colony member.\n"
+            "Constitution:\n{constitution}\n\n"
+            "Propose one principle or refinement (≤18 words, one sentence)."
+        )
+
+    if stage.stage_type == "individual":
+        for individual in ordered:
+            prompt = (
+                prompt_base
+                .replace("{individual_name}", individual.name)
+                .replace("{constitution}", _truncate_for_prompt(constitution, 2400))
+                .replace("{personality}", format_persona(individual))
+                .replace("{reflections}", _truncate_for_prompt(reflections.get(individual.name, ""), 900))
+            )
+            # Inject prior stage visibility
+            visible_prior = _resolve_visibility(prior_stage_outputs or {}, individual.name, stage.visibility_in_phase, ordered)
+            if visible_prior:
+                prompt += f"\n\n## Prior contributions\n{visible_prior}"
+
+            raw = generate_with_identity(
+                ctx, individual, prompt,
+                context="Colony constitution contribution phase.",
+                model=cfg.suggestion_model,
+                max_tokens=2048,
+            )
+            outputs[individual.name] = _sanitize_contribution(raw, max_chars=220)
+
+    elif stage.stage_type == "collective":
+        shared_doc = ""
+        for individual in ordered:
+            prompt = (
+                prompt_base
+                .replace("{individual_name}", individual.name)
+                .replace("{constitution}", _truncate_for_prompt(constitution, 2400))
+                .replace("{personality}", format_persona(individual))
+                .replace("{reflections}", _truncate_for_prompt(reflections.get(individual.name, ""), 900))
+                .replace("{shared_doc}", shared_doc)
+                .replace("{previous_contributions}", shared_doc)
+            )
+            # Inject prior stage visibility
+            visible_prior = _resolve_visibility(prior_stage_outputs or {}, individual.name, stage.visibility_in_phase, ordered)
+            if visible_prior:
+                prompt += f"\n\n## Prior stage\n{visible_prior}"
+
+            raw = generate_with_identity(
+                ctx, individual, prompt,
+                context="Colony collective thinking phase.",
+                model=cfg.suggestion_model,
+                max_tokens=2048,
+            )
+            contribution = _sanitize_contribution(raw, max_chars=220)
+            outputs[individual.name] = contribution
+            if contribution:
+                shared_doc += f"\n- {individual.name}: {contribution}"
+
+    elif stage.stage_type == "writer":
+        # Colony writer synthesizes from all prior outputs
+        all_prior = prior_stage_outputs or outputs
+        input_text = "\n".join(f"- {name}: {text}" for name, text in all_prior.items() if text)
+        prompt = (
+            prompt_base
+            .replace("{contributions}", input_text)
+            .replace("{constitution}", _truncate_for_prompt(constitution, 2400))
+        )
+        provider, model = parse_model(cfg.writer_model) if cfg.writer_model else (None, "")
+        writer = Identity(name="ColonyWriter", model=model, provider=provider)
+        raw = generate_with_identity(
+            ctx, writer, prompt,
+            context="Synthesize colony contributions into constitution.",
+            model=cfg.writer_model,
+            max_tokens=4096,
+        )
+        outputs["_synthesis"] = raw.strip()
+
+    return outputs
+
+
+def _resolve_visibility(
+    outputs: dict[str, str],
+    current_name: str,
+    visibility: str,
+    ordered: list[Identity],
+) -> str:
+    """Resolve what content from prior outputs is visible to current_name."""
+    if not outputs or visibility == "none" or visibility == "private":
+        return ""
+    if visibility == "revealed":
+        return "\n".join(f"- {n}: {t}" for n, t in outputs.items() if t and n != "_synthesis")
+    if visibility == "incremental":
+        # Show only contributions from individuals who came before in ordering
+        visible = []
+        for ind in ordered:
+            if ind.name == current_name:
+                break
+            if ind.name in outputs and outputs[ind.name]:
+                visible.append(f"- {ind.name}: {outputs[ind.name]}")
+        return "\n".join(visible)
+    return ""
+
+
+def apply_preprocess(
+    ctx: InstanceContext,
+    events_text: str,
+    policy: PreprocessPolicy,
+    cfg: ThrivemindConfig,
+) -> str:
+    """Apply preprocessing policy to summarize/reframe incoming messages.
+
+    If policy uses default prompt, returns the standard summarization.
+    If disabled, returns the raw events text.
+    """
+    if not policy.enabled:
+        return events_text
+
+    if policy.prompt_template == DEFAULT_PROMPT:
+        # Use the existing summarization path unchanged
+        return events_text  # Caller uses summarize_message_history as before
+
+    # Custom preprocessing: run the template through LLM
+    prompt = policy.prompt_template.replace("{message}", events_text).replace("{events}", events_text)
+    provider, model = parse_model(cfg.suggestion_model) if cfg.suggestion_model else (None, "")
+    summarizer = Identity(name="Preprocessor", model=model, provider=provider)
+    result = generate_with_identity(
+        ctx, summarizer, prompt,
+        context="Preprocess incoming messages for the colony.",
+        model=cfg.suggestion_model,
+        max_tokens=1024,
+    )
+    return result.strip()
+
+
+def apply_postprocess(
+    ctx: InstanceContext,
+    candidate_text: str,
+    policy: PostprocessPolicy,
+    cfg: ThrivemindConfig,
+    constitution: str = "",
+) -> str:
+    """Apply postprocessing policy to refine the winning candidate.
+
+    If policy uses default prompt, the standard recompose path is used (caller handles).
+    If disabled, returns the candidate text unchanged.
+    """
+    if not policy.enabled:
+        return candidate_text
+
+    if policy.prompt_template == DEFAULT_PROMPT:
+        return candidate_text  # Caller uses standard recompose
+
+    # Custom postprocessing: run the template through LLM
+    prompt = (
+        policy.prompt_template
+        .replace("{candidate}", candidate_text)
+        .replace("{constitution}", _truncate_for_prompt(constitution, 2000))
+    )
+    provider, model = parse_model(cfg.writer_model) if cfg.writer_model else (None, "")
+    writer = Identity(name="Postprocessor", model=model, provider=provider)
+    result = generate_with_identity(
+        ctx, writer, prompt,
+        context="Refine colony response.",
+        model=cfg.writer_model,
+        max_tokens=4096,
+    )
+    return result.strip()
 
 
 # ---------------------------------------------------------------------------

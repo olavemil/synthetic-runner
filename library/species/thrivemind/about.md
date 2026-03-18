@@ -11,42 +11,39 @@ Thrivemind is a colony deliberation species. A colony of individuals — each wi
 | `colony.md` | Snapshot of current colony members and their approval scores |
 | `contributions.md` | Latest round's proposed constitution lines |
 | `candidate.md` | Latest proposed constitution draft before voting |
+| `processes.md` | Auto-generated description of active policies and processes |
 | `reflections/{name}.md` | Per-individual reflections on colony state |
 
 ## on_message flow
 
 ```
 on_message(events):
+  policies = load_policies()
   colony = load_colony() or spawn_initial_colony()
   constitution = load_constitution()
-  message_summary = summarize_message_history(events)
+
+  # PREPROCESS (customizable via policies.on_message.preprocess)
+  if custom preprocess:
+    message_summary = apply_preprocess(events, policy.prompt_template)
+  else:
+    message_summary = summarize_message_history(events)
 
   for each individual in colony:
-    prior_reflection = load_reflection(individual)
-    reflection = reflect_on_colony(individual, colony, constitution, prior_reflection, message_summary)
-    save_reflection(individual, reflection)
+    reflection = reflect_on_colony(individual, colony, constitution, ...)
     individual_contexts[individual] = build context from reflection
 
   suggesters = select_suggesters(colony, n=colony_size * suggestion_fraction)
-    → weighted by approval score
-
   result = deliberate(colony, prompt, suggesters, individual_contexts)
-    → each suggester generates a candidate reply
-    → all colony members vote (Borda count)
-    → returns winner + scores + consensus status
 
   writer = Identity("Colony", writer_model)
-  if has_consensus:
-    final = recompose(writer, winner_message, all_candidates)
-  else:
-    fallback = join top-scoring candidates until threshold coverage
-    final = recompose(writer, fallback, selected_candidates)
+  final = recompose(writer, winner_message, all_candidates)
+
+  # POSTPROCESS (customizable via policies.on_message.postprocess)
+  if custom postprocess:
+    final = apply_postprocess(final, policy.prompt_template)
 
   ctx.send(target_room, "Consensus: X%\n\n" + final)
-
-  colony = update_approvals(colony, votes, winner)
-    → winner's first-place voters gain +1 approval
-    → losers' voters lose -1 approval
+  colony = update_cohesion(colony, votes, winner)
   save_colony(colony)
 ```
 
@@ -54,44 +51,41 @@ on_message(events):
 
 ```
 heartbeat():
+  policies = load_policies()
+  write_process_description()  → processes.md (self-inspection)
   colony = load_colony() or spawn_initial_colony()
   constitution = load_constitution()
 
   for each individual:
     reflection = reflect_on_colony(individual, colony, constitution, ...)
-    save_reflection(individual, reflection)
 
-  lines = []
-  for each individual:
-    line = contribute_constitution_line(individual, constitution)
-      → proposes exactly one new principle (≤18 words)
-    lines.append(line)
+  # THINKING STAGES (customizable via policies.thinking.stages)
+  if policy stages configured:
+    for each stage in stages:
+      run_thinking_stage(colony, stage, constitution, reflections)
+        → individual: each writes independently
+        → collective: ordered access to shared document
+        → writer: colony writer synthesizes
+  else:
+    for each individual:
+      line = contribute_constitution_line(individual, constitution)
 
-  save_contributions(lines)
   proposed = rewrite_constitution(lines, current_constitution)
-    → ColonyWriter identity synthesises a new draft
-  save_candidate(proposed)
 
   # Round 1 vote
-  for each individual:
-    accepted = vote_constitution(individual, current, proposed)
-  if acceptance_ratio > consensus_threshold:
-    adopted = True
-  else:
-    # Round 2 vote with round-1 context
-    for each individual:
-      accepted = vote_constitution(individual, current, proposed, round1_context)
-    adopted = acceptance_ratio_round2 > consensus_threshold
+  # Round 2 vote (if needed)
+  if adopted: save_constitution(proposed)
 
-  if adopted:
-    save_constitution(proposed)
-
+  colony = vote_peer_approval(colony)
   colony = run_spawn_cycle(colony)
-    → individuals with approval >= threshold reproduce and are replaced by offspring
-    → colony size held constant
+
+  # POST-SPAWN STAGES (customizable via policies.thinking.post_spawn)
+  if post_spawn stages configured:
+    for each stage: run_thinking_stage(...)
 
   save_colony(colony)
-  save_colony_snapshot(colony)   → writes colony.md
+  organize_phase()
+  creative_phase()
 ```
 
 ## Config keys (`thrivemind:` block in instance YAML)
@@ -106,3 +100,60 @@ thrivemind:
   writer_model: ""              # provider/model for final composition and constitution rewrite
   voice_space: main             # logical space name for outbound replies
 ```
+
+## Policies (`thrivemind.policies:` block in instance YAML)
+
+Policies customize the colony's processing pipeline. All are optional; defaults match pre-policy behavior.
+
+```yaml
+thrivemind:
+  policies:
+    on_message:
+      preprocess:
+        enabled: true             # whether to preprocess incoming messages
+        prompt_template: default  # "default" or custom prompt with {message}/{events}
+      postprocess:
+        enabled: true             # whether to postprocess the final response
+        prompt_template: default  # "default" or custom prompt with {candidate}/{constitution}
+
+    thinking:
+      stages:                     # 0-3 pre-voting stages (default: none = single contribution)
+        - name: "individual_reflection"
+          type: "individual"      # individual | collective | writer
+          prompt_template: default
+          ordering: "random"      # cohesion_asc/desc, approval_asc/desc, combined_asc/desc, random
+          visibility_after: "revealed"     # private | revealed | incremental | none
+          visibility_in_phase: "none"      # for collective stages: incremental | revealed | none
+
+      post_spawn:                 # 0-2 post-spawn stages (same structure as stages)
+        - name: "orientation"
+          type: "collective"
+```
+
+### Stage types
+
+- **individual**: Each colony member writes independently to their own output. No one sees others' work (until visibility changes).
+- **collective**: Colony members contribute to a shared document in sequence. Ordering and visibility_in_phase control who sees what.
+- **writer**: The colony writer synthesizes all prior stage outputs into a single output.
+
+### Ordering schemes
+
+| Scheme | Description |
+|--------|-------------|
+| `random` | Randomized order (default) |
+| `cohesion_asc` / `cohesion_desc` | By cohesion score |
+| `approval_asc` / `approval_desc` | By approval score |
+| `combined_asc` / `combined_desc` | By cohesion x (approval+1) |
+
+### Visibility options
+
+| Option | Description |
+|--------|-------------|
+| `private` | Content not visible to others |
+| `revealed` | Content visible to all |
+| `incremental` | Revealed progressively (person N sees N-1's work) |
+| `none` | Content not shared |
+
+### Self-inspection
+
+The colony writes `processes.md` at the start of each heartbeat, describing the active configuration and policies. Colony members can read this file to understand their own governance processes.

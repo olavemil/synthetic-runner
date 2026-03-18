@@ -16,8 +16,13 @@ from typing import TYPE_CHECKING
 from library.species import Species, SpeciesManifest, EntryPoint
 from library.tools.thrivemind import (
     ThrivemindConfig,
+    ThrivemindPolicies,
+    apply_preprocess,
+    apply_postprocess,
     build_colony_snapshot,
     build_reflection_context,
+    describe_processes,
+    write_process_description,
     clear_events,
     clear_inbox,
     read_inbox,
@@ -29,7 +34,9 @@ from library.tools.thrivemind import (
     load_config,
     load_constitution,
     load_events,
+    load_policies,
     load_reflection,
+    order_colony,
     pick_fallback_candidate_ids,
     archive_removed_individual,
     generate_descriptor,
@@ -39,6 +46,7 @@ from library.tools.thrivemind import (
     reflect_on_colony,
     run_messaging_phase,
     run_spawn_cycle,
+    run_thinking_stage,
     save_colony,
     save_colony_snapshot,
     save_constitution,
@@ -146,6 +154,7 @@ def on_message(
 
     logger.info("Thrivemind on_message start (events=%d)", len(events))
     cfg = load_config(ctx)
+    policies = load_policies(ctx, cfg)
 
     # Select target room from events
     target_room, scoped_events = select_target_room(events, cfg.voice_space)
@@ -162,13 +171,22 @@ def on_message(
     # Build context for deliberation
     constitution = load_constitution(ctx)
     conversation = format_events(scoped_events, self_entity_id=get_entity_id(ctx))
-    prompt = _PROMPT_CANDIDATE.replace("{conversation}", conversation)
     # Capture prior messages before recording current events
     prior_received = load_received_messages(ctx)
     append_received_events(ctx, events)
-    message_summary = summarize_message_history(ctx, scoped_events, cfg)
+
+    # Apply preprocessing policy (custom or default summarization)
+    pre_policy = policies.on_message.preprocess
+    if pre_policy.enabled and pre_policy.prompt_template != "default":
+        message_summary = apply_preprocess(ctx, conversation, pre_policy, cfg)
+        logger.info("Thrivemind on_message applied custom preprocessing (chars=%d)", len(message_summary))
+    else:
+        message_summary = summarize_message_history(ctx, scoped_events, cfg)
+
     if prior_received.strip():
         message_summary = f"## Prior Messages\n{prior_received.strip()}\n\n{message_summary}" if message_summary else f"## Prior Messages\n{prior_received.strip()}"
+
+    prompt = _PROMPT_CANDIDATE.replace("{conversation}", conversation)
     colony_md = ctx.read("colony.md") or build_colony_snapshot(colony)
     colony_events = load_events(ctx)
     events_text = format_events_for_context(colony_events)
@@ -236,6 +254,7 @@ def on_message(
     writer_context = f"{constitution_for_writer}\n\n{_IDENTITY_REQUIREMENT}"
 
     # Send response based on consensus type
+    post_policy = policies.on_message.postprocess
     if result["has_consensus"] or result["candidate_count"] == 1:
         # Winner has sufficient consensus
         winner_id = result["winner_member"]
@@ -244,6 +263,10 @@ def on_message(
             writer_context, cfg.writer_model, max_tokens=4096,
             prompt_template=_PROMPT_RECOMPOSE,
         )
+        # Apply custom postprocessing if configured
+        if post_policy.enabled and post_policy.prompt_template != "default":
+            final = apply_postprocess(ctx, final, post_policy, cfg, constitution)
+            logger.info("Thrivemind on_message applied custom postprocessing")
         outbound = with_consensus_status(
             format_consensus_status(result, drafters=[winner_id]), final
         )
@@ -262,7 +285,7 @@ def on_message(
             msg for msg in [result["winner_message"], result.get("second_message", "")] if msg
         )
         combined_consensus = result.get("combined_consensus", 0.0)
-        
+
         logger.info(
             "Thrivemind on_message combined consensus winner+second combined_consensus=%.3f threshold=%.3f",
             combined_consensus, cfg.consensus_threshold,
@@ -272,6 +295,10 @@ def on_message(
             writer_context, cfg.writer_model, max_tokens=4096,
             prompt_template=_PROMPT_RECOMPOSE,
         )
+        # Apply custom postprocessing if configured
+        if post_policy.enabled and post_policy.prompt_template != "default":
+            final = apply_postprocess(ctx, final, post_policy, cfg, constitution)
+            logger.info("Thrivemind on_message applied custom postprocessing (combined)")
         outbound = with_consensus_status(
             format_consensus_status(result, combined_consensus, drafters=[winner_id, second_id]),
             final,
@@ -314,6 +341,10 @@ def on_message(
 def heartbeat(ctx: InstanceContext) -> None:
     """Constitution update and spawn cycle."""
     cfg = load_config(ctx)
+    policies = load_policies(ctx, cfg)
+
+    # Write process description for colony self-inspection
+    write_process_description(ctx, cfg, policies)
 
     # Load or initialize colony
     colony = load_colony(ctx)
@@ -350,16 +381,43 @@ def heartbeat(ctx: InstanceContext) -> None:
 
     run_messaging_phase(ctx, colony, cfg)
 
-    # Constitution contribution phase
-    lines = []
-    for individual in colony:
-        line = contribute_constitution_line(
-            ctx, individual, constitution, cfg,
-            reflections=individual_reflections.get(individual.name, ""),
-        )
-        if line:
-            lines.append(line)
-    logger.info("Thrivemind heartbeat proposed constitution lines=%d", len(lines))
+    # Constitution contribution phase — use policy stages if configured
+    thinking_stages = policies.thinking.stages
+    if thinking_stages:
+        # Multi-stage thinking pipeline
+        prior_outputs: dict[str, str] | None = None
+        for stage in thinking_stages:
+            stage_outputs = run_thinking_stage(
+                ctx, colony, cfg, stage, constitution, individual_reflections,
+                prior_stage_outputs=prior_outputs,
+            )
+            logger.info(
+                "Thrivemind heartbeat stage=%s type=%s outputs=%d",
+                stage.name, stage.stage_type, len(stage_outputs),
+            )
+            # Chain outputs: next stage can see this stage's work
+            prior_outputs = stage_outputs
+
+        # Extract lines from final stage outputs for constitution rewrite
+        if prior_outputs and "_synthesis" in prior_outputs:
+            # Writer stage produced a synthesis — use directly
+            lines = [prior_outputs["_synthesis"]]
+        else:
+            lines = [text for name, text in (prior_outputs or {}).items()
+                      if text and name != "_synthesis"]
+        logger.info("Thrivemind heartbeat policy-driven stages produced lines=%d", len(lines))
+    else:
+        # Default: everyone contributes a line simultaneously (today's behavior)
+        lines = []
+        for individual in colony:
+            line = contribute_constitution_line(
+                ctx, individual, constitution, cfg,
+                reflections=individual_reflections.get(individual.name, ""),
+            )
+            if line:
+                lines.append(line)
+        logger.info("Thrivemind heartbeat proposed constitution lines=%d", len(lines))
+
     save_contributions(ctx, lines)
 
     # Rewrite and vote on constitution
@@ -454,6 +512,24 @@ def heartbeat(ctx: InstanceContext) -> None:
 
     save_colony(ctx, colony)
     save_colony_snapshot(ctx, colony)
+
+    # Post-spawn thinking stages (if configured)
+    post_spawn_stages = policies.thinking.post_spawn
+    if post_spawn_stages:
+        # Re-read constitution in case it was adopted
+        post_constitution = load_constitution(ctx)
+        post_reflections = individual_reflections  # reuse existing reflections
+        prior_outputs = None
+        for stage in post_spawn_stages:
+            stage_outputs = run_thinking_stage(
+                ctx, colony, cfg, stage, post_constitution, post_reflections,
+                prior_stage_outputs=prior_outputs,
+            )
+            logger.info(
+                "Thrivemind heartbeat post-spawn stage=%s type=%s outputs=%d",
+                stage.name, stage.stage_type, len(stage_outputs),
+            )
+            prior_outputs = stage_outputs
 
     # Organize phase: knowledge organization after constitution and spawn cycle
     _run_organize_phase(ctx, cfg)
