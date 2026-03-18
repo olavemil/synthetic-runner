@@ -46,6 +46,7 @@ _PROMPT_CONTRIBUTE_RETRY = (_PROMPTS_DIR / "contribute_constitution_retry.md").r
 _PROMPT_REWRITE = (_PROMPTS_DIR / "rewrite_constitution.md").read_text()
 _PROMPT_VOTE = (_PROMPTS_DIR / "vote_constitution.md").read_text()
 _PROMPT_VOTE_PEER = (_PROMPTS_DIR / "vote_peer.md").read_text()
+_PROMPT_DESCRIPTOR = (_PROMPTS_DIR / "descriptor.md").read_text()
 
 
 def _word_count(text: str) -> int:
@@ -258,7 +259,11 @@ def _spawn_score(ind: Identity) -> float:
     return ind.cohesion + ind.approval
 
 
-def build_colony_snapshot(colony: list[Identity], events: list[dict] | None = None) -> str:
+def build_colony_snapshot(
+    colony: list[Identity],
+    events: list[dict] | None = None,
+    descriptors: dict[str, str] | None = None,
+) -> str:
     """Render a human-readable colony snapshot markdown document."""
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
     lines = [
@@ -267,17 +272,18 @@ def build_colony_snapshot(colony: list[Identity], events: list[dict] | None = No
         f"Generated: {timestamp}",
         f"Individuals: {len(colony)}",
         "",
-        "| Individual | Personality | Cohesion | Approval | Age |",
-        "| --- | --- | ---: | ---: | ---: |",
+        "| Individual | Descriptor | Personality | Cohesion | Approval | Age |",
+        "| --- | --- | --- | ---: | ---: | ---: |",
     ]
 
     if not colony:
-        lines.append("| - | - | 0 | 0 | 0 |")
+        lines.append("| - | - | - | 0 | 0 | 0 |")
     else:
         for ind in sorted(colony, key=lambda i: (-_spawn_score(i), i.created_at, i.name)):
             personality = _md_escape(format_persona(ind))
+            descriptor = _md_escape((descriptors or {}).get(ind.name, ""))
             lines.append(
-                f"| `{ind.name}` | {personality} | {ind.cohesion:.1f} | {ind.approval} | {ind.age} |"
+                f"| `{ind.name}` | {descriptor} | {personality} | {ind.cohesion:.1f} | {ind.approval} | {ind.age} |"
             )
 
     events_section = format_events_for_context(events or [])
@@ -291,7 +297,8 @@ def build_colony_snapshot(colony: list[Identity], events: list[dict] | None = No
 def save_colony_snapshot(ctx: InstanceContext, colony: list[Identity]) -> None:
     """Write colony.md snapshot to instance memory storage."""
     events = load_events(ctx)
-    content = build_colony_snapshot(colony, events=events)
+    descriptors = {ind.name: load_descriptor(ctx, ind) for ind in colony}
+    content = build_colony_snapshot(colony, events=events, descriptors=descriptors)
     logger.info(
         "Writing thrivemind colony.md (individuals=%d, events=%d, chars=%d)",
         len(colony),
@@ -505,10 +512,15 @@ def load_events(ctx: InstanceContext) -> list[dict]:
         return []
 
 
+_EVENTS_MAX = 100
+
+
 def _append_event(ctx: InstanceContext, event: dict) -> None:
-    """Append a single event to the event log."""
+    """Append a single event to the event log, pruning to keep at most _EVENTS_MAX entries."""
     events = load_events(ctx)
     events.append(event)
+    if len(events) > _EVENTS_MAX:
+        events = events[-_EVENTS_MAX:]
     ctx.write(_EVENTS_FILE, json.dumps(events, ensure_ascii=False))
 
 
@@ -624,20 +636,83 @@ def clear_inbox(ctx: InstanceContext, individual: Identity) -> None:
     ctx.write(_inbox_path(individual), "")
 
 
-def archive_removed_individual(ctx: "InstanceContext", name: str) -> None:
+def _descriptor_path(individual: "Identity | str") -> str:
+    name = individual.name if isinstance(individual, Identity) else str(individual)
+    return f"descriptors/{quote(name, safe='-_.,')}.md"
+
+
+def load_descriptor(ctx: "InstanceContext", individual: "Identity | str") -> str:
+    """Load the current self-descriptor for an individual, or empty string."""
+    return ctx.read(_descriptor_path(individual)) or ""
+
+
+def save_descriptor(ctx: "InstanceContext", individual: "Identity | str", text: str) -> None:
+    ctx.write(_descriptor_path(individual), text)
+
+
+def generate_descriptor(
+    ctx: "InstanceContext",
+    individual: Identity,
+    cfg: "ThrivemindConfig",
+    reflection: str = "",
+    inbox_text: str = "",
+) -> str:
+    """Generate a one-liner self-descriptor from the individual's current state."""
+    prev_descriptor = load_descriptor(ctx, individual)
+    persona = format_persona(individual)
+    context_parts = [f"Your personality: {persona}"]
+    if reflection.strip():
+        context_parts.append(f"Your recent thinking:\n{reflection.strip()[:600]}")
+    if inbox_text.strip():
+        context_parts.append(f"Messages you received:\n{inbox_text.strip()[:400]}")
+    if prev_descriptor.strip():
+        context_parts.append(f"Your previous descriptor: {prev_descriptor.strip()}")
+    context = "\n\n".join(context_parts)
+    prompt = _PROMPT_DESCRIPTOR.replace("{individual_name}", individual.name)
+    raw = generate_with_identity(
+        ctx, individual, prompt,
+        context=context,
+        model=cfg.suggestion_model,
+        max_tokens=128,
+    ).strip()
+    # Take first line only, cap at 200 chars
+    descriptor = raw.splitlines()[0].strip()[:200] if raw else ""
+    if descriptor:
+        save_descriptor(ctx, individual, descriptor)
+    logger.info("Generated descriptor for %s (%d chars)", individual.name, len(descriptor))
+    return descriptor
+
+
+def update_heritage(ctx: "InstanceContext", name: str, descriptor: str, cause: str) -> None:
+    """Append a removed individual's record to heritage.md."""
+    import time as _time
+    timestamp = _time.strftime("%Y-%m-%d %H:%M UTC", _time.gmtime())
+    existing = ctx.read("heritage.md") or "# Heritage\n\nThis file records the lives of those who have left the colony.\n"
+    entry = f"\n## {name}\n\n**Departed:** {timestamp}  \n**Cause:** {cause}  \n**Descriptor:** {descriptor or '(none)'}\n"
+    ctx.write("heritage.md", existing.rstrip() + entry)
+    logger.info("Updated heritage.md for removed individual %s (cause=%s)", name, cause)
+
+
+def archive_removed_individual(ctx: "InstanceContext", name: str, cause: str = "removed") -> None:
     """Archive a removed colony individual's final reflection and clean up their files.
 
     Copies the individual's last reflection (updated during the heartbeat
     reflection phase) to removed/{name}.md for preservation in the synced data
     repo. Clears the original reflection file. The inbox is already cleared
     during the heartbeat reflection phase before the spawn cycle runs.
+    Appends a record (with self-descriptor and cause) to heritage.md.
     """
     reflection = (ctx.read(_reflection_path(name)) or "").strip()
     archived = reflection if reflection else "(no data)"
 
     ctx.write(f"removed/{quote(name, safe='-_.,')}.md", archived)
     ctx.write(_reflection_path(name), "")
-    logger.info("Archived removed individual %s to removed/%s.md", name, name)
+
+    descriptor = load_descriptor(ctx, name)
+    ctx.write(_descriptor_path(name), "")
+
+    update_heritage(ctx, name, descriptor, cause)
+    logger.info("Archived removed individual %s to removed/%s.md (cause=%s)", name, name, cause)
 
 
 def deliver_message(
@@ -1021,29 +1096,33 @@ def run_spawn_cycle(
     colony: list[Identity],
     cfg: ThrivemindConfig,
     rng: random.Random | None = None,
-) -> list[Identity]:
+) -> tuple[list[Identity], dict[str, str]]:
     """Eligible individuals spawn offspring; colony stays within size bounds.
 
     - If colony is below max, eligible members spawn offspring (parents stay).
     - If colony is at max, eligible members are replaced by offspring.
     - Colony is trimmed to max_colony_size if over.
+
+    Returns (new_colony, removal_causes) where removal_causes maps removed
+    individual name → cause string ("spawned offspring" or "eliminated").
     """
     rng = rng or random.Random()
     if not colony:
-        return colony
+        return colony, {}
 
     eligible = [ind for ind in colony if _spawn_score(ind) >= cfg.approval_threshold]
     if not eligible:
-        return colony
+        return colony, {}
 
     total_score = sum(max(0.0, _spawn_score(ind)) for ind in eligible)
     if total_score == 0:
-        return colony
+        return colony, {}
 
     existing_names = {ind.name for ind in colony}
     new_individuals: list[Identity] = []
     now = int(time.time())
     room = cfg.max_colony_size - len(colony)
+    spawned_parents: set[str] = set()
 
     if room > 0:
         # Under max: parents survive, just add offspring
@@ -1063,13 +1142,18 @@ def run_spawn_cycle(
             (other,) = rng.choices(eligible, weights=weights, k=1)
             new_individuals.append(_make_offspring(primary, other, rng, existing_names, now))
             to_remove_names.add(primary.name)
+            spawned_parents.add(primary.name)
 
         remaining = [ind for ind in colony if ind.name not in to_remove_names]
         new_colony = remaining + new_individuals
 
+    original_names = {ind.name for ind in colony}
     # Trim to max (lowest combined score removed first)
+    eliminated: set[str] = set()
     if len(new_colony) > cfg.max_colony_size:
         new_colony.sort(key=_spawn_score)
+        trimmed = new_colony[:len(new_colony) - cfg.max_colony_size]
+        eliminated = {ind.name for ind in trimmed if ind.name in original_names}
         new_colony = new_colony[len(new_colony) - cfg.max_colony_size:]
 
     # Pad to min
@@ -1083,7 +1167,19 @@ def run_spawn_cycle(
         ind.cohesion *= 0.9
         ind.approval *= 0.9
 
-    return new_colony
+    # Build removal causes map for individuals that were in original colony but not in new
+    new_names = {ind.name for ind in new_colony}
+    removal_causes: dict[str, str] = {}
+    for name in original_names:
+        if name not in new_names:
+            if name in spawned_parents:
+                removal_causes[name] = "spawned offspring"
+            elif name in eliminated:
+                removal_causes[name] = "eliminated"
+            else:
+                removal_causes[name] = "removed"
+
+    return new_colony, removal_causes
 
 
 # ---------------------------------------------------------------------------

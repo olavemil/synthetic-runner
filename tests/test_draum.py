@@ -41,6 +41,7 @@ def test_on_message_falls_back_to_main_for_unmapped_space(monkeypatch):
     monkeypatch.setattr(draum_mod, "run_subconscious", lambda ctx, session_type="reactive": None)
     monkeypatch.setattr(draum_mod, "run_react", lambda ctx, session_type="reactive": None)
     monkeypatch.setattr(draum_mod, "update_relationships", lambda ctx, session_type, events=None: None)
+    monkeypatch.setattr(draum_mod, "run_entity_mapping_phase", lambda ctx, events=None: None)
 
     calls: list[str] = []
 

@@ -13,16 +13,25 @@ from library.tools.consilium import (
     build_shared_context,
     build_thinking_context,
     load_config,
+    load_ghost_context,
     load_persona_memory,
     load_shared_memory,
     run_drafting_phase,
+    run_ghost_review_phase,
     run_merge_phase,
     run_reduction_phase,
     run_review_phase,
     run_transform_phase,
     update_persona_subconscious,
 )
-from library.tools.prompts import format_events, get_entity_id, select_target_room
+from library.tools.prompts import (
+    append_received_events,
+    clear_received_messages,
+    format_events,
+    get_entity_id,
+    load_received_messages,
+    select_target_room,
+)
 
 if TYPE_CHECKING:
     from library.harness.adapters import Event
@@ -112,8 +121,16 @@ def on_message(
     context = build_shared_context(shared)
     conversation = format_events(scoped_events, self_entity_id=get_entity_id(ctx))
 
+    # Include messages received before this batch as additional context, then record current events
+    prior_msgs = load_received_messages(ctx)
+    if prior_msgs.strip():
+        context = context + f"\n\n## Prior Messages (since last heartbeat)\n{prior_msgs.strip()}" if context else f"## Prior Messages (since last heartbeat)\n{prior_msgs.strip()}"
+    append_received_events(ctx, events)
+
     # Phase 1: Drafting — 5 persona drafts + 3 ghost one-liners
-    candidates = run_drafting_phase(ctx, cfg, conversation, target_room, context)
+    # Load ghost-generated ideas and recommendations for persona context (not ghost)
+    ghost_ctx = load_ghost_context(ctx, cfg)
+    candidates = run_drafting_phase(ctx, cfg, conversation, target_room, context, persona_extra_context=ghost_ctx)
     if not candidates:
         logger.info("Consilium on_message: no candidates; skipping")
         return
@@ -150,7 +167,26 @@ def on_message(
     for persona in cfg.personas:
         update_persona_subconscious(ctx, persona, conversation, shared)
 
+    from library.tools.patterns import run_entity_mapping_phase
+    run_entity_mapping_phase(ctx, events)
+
     logger.info("Consilium on_message completed")
+
+
+def _write_meta_thinking(
+    ctx: InstanceContext, cfg: ConsiliumConfig, thoughts: dict[str, str]
+) -> None:
+    """Write combined persona thoughts to meta-thinking.md after all iterations."""
+    import time as _time
+    timestamp = _time.strftime("%Y-%m-%d %H:%M UTC", _time.gmtime())
+    parts = [f"# Meta-Thinking\n\n*Generated: {timestamp}*\n"]
+    for p in cfg.personas:
+        thought = thoughts.get(p.name, "").strip()
+        if thought:
+            parts.append(f"## {p.name}\n\n{thought}")
+    content = "\n\n".join(parts) + "\n"
+    ctx.write("meta-thinking.md", content)
+    logger.info("Consilium heartbeat: wrote meta-thinking.md (%d chars)", len(content))
 
 
 def heartbeat(ctx: InstanceContext) -> None:
@@ -164,6 +200,9 @@ def heartbeat(ctx: InstanceContext) -> None:
 
     from library.tools.patterns import thinking_session
     from library.tools.phases import THINK_SCOPES, get_tools_for_scopes
+
+    recent_msgs = load_received_messages(ctx)
+    clear_received_messages(ctx)
 
     previous_thoughts: dict[str, str] = {}
     for iteration in range(cfg.thinking_iterations):
@@ -182,6 +221,7 @@ def heartbeat(ctx: InstanceContext) -> None:
             persona_mem = load_persona_memory(ctx, persona)
             initial_message = build_thinking_context(
                 shared, persona_mem, previous_thoughts, persona.name,
+                recent_msgs=recent_msgs if iteration == 0 else "",
             )
 
             system = (
@@ -212,11 +252,22 @@ def heartbeat(ctx: InstanceContext) -> None:
             iteration + 1, cfg.thinking_iterations,
         )
 
+    # Write meta-thinking.md: aggregated persona thoughts after all iterations
+    _write_meta_thinking(ctx, cfg, previous_thoughts)
+
+    # Ghost subconscious review: update ideas.md and recommendations.md
+    meta_thinking = ctx.read("meta-thinking.md") or ""
+    run_ghost_review_phase(ctx, cfg, meta_thinking)
+
     # Organize phase
     _run_organize_phase(ctx, cfg)
 
     # Creative phase
     _run_create_phase(ctx, cfg)
+
+    # Publish graph, map, and creations to data repo
+    from library.publish import render_and_publish
+    render_and_publish(ctx)
 
     logger.info("Consilium heartbeat completed")
 

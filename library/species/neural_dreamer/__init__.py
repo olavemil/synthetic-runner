@@ -1112,6 +1112,9 @@ def on_message(
             logger.info("on_message: running post-reply extra thinking")
             _run_think_phase(ctx, weights, variables)
 
+    from library.tools.patterns import run_entity_mapping_phase
+    run_entity_mapping_phase(ctx, events)
+
 
 class NeuralDreamer(Species):
     def manifest(self) -> SpeciesManifest:

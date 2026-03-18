@@ -166,3 +166,41 @@ def select_target_room(
             )
         return target_room, room_events
     return default_space, events
+
+
+# ---------------------------------------------------------------------------
+# Recent received messages — persistent log cleared after heartbeat
+# ---------------------------------------------------------------------------
+
+_RECEIVED_MESSAGES_FILE = "received_messages.md"
+_RECEIVED_MESSAGES_MAX_LINES = 100
+
+
+def append_received_events(ctx: "InstanceContext", events: "list[Event]") -> None:
+    """Append formatted incoming events to received_messages.md for later recall."""
+    if not events:
+        return
+    existing = ctx.read(_RECEIVED_MESSAGES_FILE) or ""
+    lines = [l for l in existing.splitlines() if l.strip()]
+    new_lines = []
+    for evt in events:
+        sender = getattr(evt, "sender", "?")
+        room = getattr(evt, "room", "")
+        body = getattr(evt, "body", "") or ""
+        loc = f" [{room}]" if room else ""
+        new_lines.append(f"- **{sender}**{loc}: {body.strip()[:300]}")
+    lines.extend(new_lines)
+    # Keep rolling window
+    if len(lines) > _RECEIVED_MESSAGES_MAX_LINES:
+        lines = lines[-_RECEIVED_MESSAGES_MAX_LINES:]
+    ctx.write(_RECEIVED_MESSAGES_FILE, "\n".join(lines) + "\n")
+
+
+def load_received_messages(ctx: "InstanceContext") -> str:
+    """Return the accumulated received_messages.md content."""
+    return ctx.read(_RECEIVED_MESSAGES_FILE) or ""
+
+
+def clear_received_messages(ctx: "InstanceContext") -> None:
+    """Clear received_messages.md (call at start of heartbeat after consuming)."""
+    ctx.write(_RECEIVED_MESSAGES_FILE, "")

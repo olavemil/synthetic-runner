@@ -13,6 +13,7 @@ from library.tools.patterns import (
     run_subconscious,
     run_react,
     update_relationships,
+    run_entity_mapping_phase,
     distill_memory,
     run_session,
 )
@@ -153,6 +154,7 @@ def on_message(
     run_subconscious(ctx, "reactive")
     run_react(ctx, "reactive")
     update_relationships(ctx, "reactive", events)
+    run_entity_mapping_phase(ctx, events)
 
 
 def heartbeat(ctx: InstanceContext) -> None:
